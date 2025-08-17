@@ -1,0 +1,12 @@
+[profile.release]
+lto = true
+opt-level = "s"
+panic = "abort"
+
+[workspace]
+members = [
+    "spider",
+    "target/caller-utils",
+    "target/caller-util?",
+]
+resolver = "2"
