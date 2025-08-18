@@ -1,26 +1,28 @@
 import { create } from 'zustand';
 import * as api from '../utils/api';
 
-interface ApiKey {
+interface ApiKeyInfo {
   provider: string;
-  created_at: number;
-  last_used?: number;
-  key_preview: string;
+  createdAt: number;
+  lastUsed?: number;
+  keyPreview: string;
 }
 
 interface SpiderApiKey {
   key: string;
   name: string;
   permissions: string[];
-  created_at: number;
+  createdAt: number;
 }
 
 interface McpServer {
   id: string;
   name: string;
   transport: {
-    Stdio?: { command: string; args: string[] };
-    Http?: { url: string };
+    transportType: string;
+    command?: string;
+    args?: string[];
+    url?: string;
   };
   tools: Array<{
     name: string;
@@ -30,42 +32,37 @@ interface McpServer {
   connected: boolean;
 }
 
+interface ConversationMetadata {
+  startTime: string;
+  client: string;
+  fromStt: boolean;
+}
+
 interface Conversation {
   id: string;
   messages: Message[];
-  metadata: {
-    start_time: string;
-    client: string;
-    from_stt: boolean;
-  };
-  llm_provider: string;
-  mcp_servers: string[];
+  metadata: ConversationMetadata;
+  llmProvider: string;
+  mcpServers: string[];
 }
 
 interface Message {
   role: string;
   content: string;
-  tool_calls?: Array<{
-    id: string;
-    tool_name: string;
-    parameters: string;
-  }>;
-  tool_results?: Array<{
-    tool_call_id: string;
-    result: string;
-  }>;
+  toolCallsJson?: string;
+  toolResultsJson?: string;
   timestamp: number;
 }
 
 interface SpiderConfig {
-  default_llm_provider: string;
-  max_tokens: number;
+  defaultLlmProvider: string;
+  maxTokens: number;
   temperature: number;
 }
 
 interface SpiderStore {
   // State
-  apiKeys: ApiKey[];
+  apiKeys: ApiKeyInfo[];
   spiderKeys: SpiderApiKey[];
   mcpServers: McpServer[];
   conversations: Conversation[];
@@ -103,8 +100,8 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
   conversations: [],
   activeConversation: null,
   config: {
-    default_llm_provider: 'anthropic',
-    max_tokens: 4096,
+    defaultLlmProvider: 'anthropic',
+    maxTokens: 4096,
     temperature: 0.7,
   },
   isLoading: false,
@@ -242,8 +239,74 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
   },
 
   sendMessage: async (message: string) => {
-    // TODO: Implement chat functionality
-    console.log('Sending message:', message);
+    try {
+      set({ isLoading: true, error: null });
+      
+      // Get current conversation or create new one
+      let conversation = get().activeConversation;
+      if (!conversation) {
+        conversation = {
+          id: '',
+          messages: [],
+          metadata: {
+            startTime: new Date().toISOString(),
+            client: 'web-ui',
+            fromStt: false,
+          },
+          llmProvider: get().config.defaultLlmProvider,
+          mcpServers: get().mcpServers.filter(s => s.connected).map(s => s.id),
+        };
+      }
+      
+      // Add user message
+      const userMessage: Message = {
+        role: 'user',
+        content: message,
+        toolCallsJson: null,
+        toolResultsJson: null,
+        timestamp: Date.now(),
+      };
+      
+      // Update local state immediately for better UX
+      conversation.messages.push(userMessage);
+      set({ activeConversation: { ...conversation } });
+      
+      // Use the admin GUI key for chat
+      const apiKey = 'sp_admin_gui_key';
+      
+      // Send to backend
+      const response = await api.chat(
+        apiKey,
+        conversation.messages,
+        conversation.llmProvider,
+        conversation.mcpServers,
+        conversation.metadata
+      );
+      
+      // Update conversation with response
+      conversation.id = response.conversationId;
+      conversation.messages.push(response.response);
+      
+      // Update conversations list
+      const conversations = get().conversations;
+      const existingIndex = conversations.findIndex(c => c.id === conversation.id);
+      if (existingIndex >= 0) {
+        conversations[existingIndex] = conversation;
+      } else {
+        conversations.unshift(conversation);
+      }
+      
+      set({ 
+        activeConversation: { ...conversation },
+        conversations: [...conversations],
+        isLoading: false 
+      });
+    } catch (error: any) {
+      set({ 
+        error: error.message || 'Failed to send message', 
+        isLoading: false 
+      });
+    }
   },
 
   loadConversations: async (client?: string, limit?: number) => {

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useSpiderStore } from '../store/spider';
 
 export default function Chat() {
-  const { activeConversation, isLoading, sendMessage } = useSpiderStore();
+  const { activeConversation, isLoading, error, sendMessage } = useSpiderStore();
   const [message, setMessage] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -15,18 +15,25 @@ export default function Chat() {
 
   return (
     <div className="chat-container">
+      {error && (
+        <div className="error-message">
+          {error}
+        </div>
+      )}
+      
       <div className="chat-messages">
         {activeConversation?.messages.map((msg, index) => (
           <div key={index} className={`message message-${msg.role}`}>
             <div className="message-role">{msg.role}</div>
             <div className="message-content">{msg.content}</div>
-            {msg.tool_calls && (
+            {msg.toolCallsJson && (
               <div className="tool-calls">
-                {msg.tool_calls.map(call => (
-                  <div key={call.id} className="tool-call">
-                    Tool: {call.tool_name}
-                  </div>
-                ))}
+                <pre>{msg.toolCallsJson}</pre>
+              </div>
+            )}
+            {msg.toolResultsJson && (
+              <div className="tool-results">
+                <pre>{msg.toolResultsJson}</pre>
               </div>
             )}
           </div>

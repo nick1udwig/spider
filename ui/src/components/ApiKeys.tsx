@@ -75,10 +75,10 @@ export default function ApiKeys() {
             <div key={key.provider} className="api-key-item">
               <div className="api-key-info">
                 <h3>{key.provider}</h3>
-                <p>Key: {key.key_preview}</p>
-                <p>Created: {new Date(key.created_at * 1000).toLocaleDateString()}</p>
-                {key.last_used && (
-                  <p>Last used: {new Date(key.last_used * 1000).toLocaleDateString()}</p>
+                <p>Key: {key.keyPreview}</p>
+                <p>Created: {new Date(key.createdAt * 1000).toLocaleDateString()}</p>
+                {key.lastUsed && (
+                  <p>Last used: {new Date(key.lastUsed * 1000).toLocaleDateString()}</p>
                 )}
               </div>
               <button

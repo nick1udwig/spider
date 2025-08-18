@@ -3,21 +3,21 @@ import { useSpiderStore } from '../store/spider';
 
 export default function Settings() {
   const { config, isLoading, error, updateConfig } = useSpiderStore();
-  const [provider, setProvider] = useState(config.default_llm_provider);
-  const [maxTokens, setMaxTokens] = useState(config.max_tokens);
+  const [provider, setProvider] = useState(config.defaultLlmProvider);
+  const [maxTokens, setMaxTokens] = useState(config.maxTokens);
   const [temperature, setTemperature] = useState(config.temperature);
 
   useEffect(() => {
-    setProvider(config.default_llm_provider);
-    setMaxTokens(config.max_tokens);
+    setProvider(config.defaultLlmProvider);
+    setMaxTokens(config.maxTokens);
     setTemperature(config.temperature);
   }, [config]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     await updateConfig({
-      default_llm_provider: provider,
-      max_tokens: maxTokens,
+      defaultLlmProvider: provider,
+      maxTokens: maxTokens,
       temperature: temperature,
     });
   };

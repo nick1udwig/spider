@@ -89,7 +89,7 @@ export default function SpiderKeys() {
                 <h3>{key.name}</h3>
                 <p className="key-value">Key: {key.key}</p>
                 <p>Permissions: {key.permissions.join(', ')}</p>
-                <p>Created: {new Date(key.created_at * 1000).toLocaleDateString()}</p>
+                <p>Created: {new Date(key.createdAt * 1000).toLocaleDateString()}</p>
               </div>
               <button
                 className="btn btn-danger"

@@ -12,11 +12,17 @@ type TabType = 'chat' | 'api-keys' | 'spider-keys' | 'mcp-servers' | 'conversati
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>('chat');
-  const { initialize } = useSpiderStore();
+  const { initialize, clearError } = useSpiderStore();
 
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  // Clear error when switching tabs
+  const handleTabChange = (tab: TabType) => {
+    clearError();
+    setActiveTab(tab);
+  };
 
   return (
     <div className="app">
@@ -28,37 +34,37 @@ function App() {
         <nav className="app-nav">
           <button 
             className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`}
-            onClick={() => setActiveTab('chat')}
+            onClick={() => handleTabChange('chat')}
           >
             Chat
           </button>
           <button 
             className={`nav-btn ${activeTab === 'api-keys' ? 'active' : ''}`}
-            onClick={() => setActiveTab('api-keys')}
+            onClick={() => handleTabChange('api-keys')}
           >
             API Keys
           </button>
           <button 
             className={`nav-btn ${activeTab === 'spider-keys' ? 'active' : ''}`}
-            onClick={() => setActiveTab('spider-keys')}
+            onClick={() => handleTabChange('spider-keys')}
           >
             Spider Keys
           </button>
           <button 
             className={`nav-btn ${activeTab === 'mcp-servers' ? 'active' : ''}`}
-            onClick={() => setActiveTab('mcp-servers')}
+            onClick={() => handleTabChange('mcp-servers')}
           >
             MCP Servers
           </button>
           <button 
             className={`nav-btn ${activeTab === 'conversations' ? 'active' : ''}`}
-            onClick={() => setActiveTab('conversations')}
+            onClick={() => handleTabChange('conversations')}
           >
             History
           </button>
           <button 
             className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`}
-            onClick={() => setActiveTab('settings')}
+            onClick={() => handleTabChange('settings')}
           >
             Settings
           </button>
