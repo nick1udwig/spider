@@ -145,10 +145,11 @@ export default function McpServers() {
         </form>
       )}
 
-      <div className="mcp-servers-list">
-        {mcpServers.length === 0 ? (
-          <p className="empty-state">No MCP servers configured</p>
-        ) : (
+      <div className="component-content">
+        <div className="mcp-servers-list">
+          {mcpServers.length === 0 ? (
+            <p className="empty-state">No MCP servers configured</p>
+          ) : (
           mcpServers.map((server) => {
             const isConnecting = connectingServers.has(server.id);
             return (
@@ -213,7 +214,8 @@ export default function McpServers() {
               </div>
             );
           })
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

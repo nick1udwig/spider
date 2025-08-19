@@ -93,6 +93,37 @@ export default function Chat() {
   const [message, setMessage] = useState('');
   const [selectedToolCall, setSelectedToolCall] = useState<{call: ToolCall, result?: ToolResult} | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatMessagesRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Auto-scroll to bottom when new messages arrive
+  const scrollToBottom = (smooth: boolean = true) => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+    }
+  };
+
+  // Scroll on new messages or loading state changes
+  useEffect(() => {
+    // Use a small delay to ensure DOM has updated
+    const timer = setTimeout(() => {
+      scrollToBottom();
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [activeConversation?.messages?.length, isLoading]);
+
+  // Scroll immediately when conversation changes
+  useEffect(() => {
+    scrollToBottom(false);
+  }, [activeConversation?.id]);
+
+  // Auto-focus input when loading completes (assistant finishes responding)
+  useEffect(() => {
+    if (!isLoading && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [isLoading]);
 
   // Helper to get tool emoji - always use the same emoji
   const getToolEmoji = (toolName: string) => {
@@ -109,6 +140,8 @@ export default function Chat() {
     try {
       await sendMessage(message, controller.signal);
       setMessage('');
+      // Scroll after sending message
+      setTimeout(() => scrollToBottom(), 50);
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error('Failed to send message:', err);
@@ -173,7 +206,7 @@ export default function Chat() {
         </div>
       )}
 
-      <div className="chat-messages">
+      <div className="chat-messages" ref={chatMessagesRef}>
         {activeConversation?.messages.map((msg, index) => {
           const toolCalls = msg.toolCallsJson ? JSON.parse(msg.toolCallsJson) as ToolCall[] : null;
           const toolResults = msg.toolResultsJson ? JSON.parse(msg.toolResultsJson) as ToolResult[] : null;
@@ -184,7 +217,6 @@ export default function Chat() {
             <React.Fragment key={index}>
               {msg.role !== 'tool' && (msg.content && msg.content.trim() && msg.content !== '[Tool calls pending]') && (
                 <div className={`message message-${msg.role}`}>
-                  <div className="message-role">{msg.role}</div>
                   <div className="message-content">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                   </div>
@@ -229,7 +261,6 @@ export default function Chat() {
         )}
         {isLoading && activeConversation && (
           <div className="message message-assistant message-thinking">
-            <div className="message-role">assistant</div>
             <div className="message-content">
               <div className="thinking-indicator">
                 <span className="spinner"></span>
@@ -238,6 +269,7 @@ export default function Chat() {
             </div>
           </div>
         )}
+        <div ref={messagesEndRef} style={{ float: 'left', clear: 'both' }} />
       </div>
 
       {selectedToolCall && (
@@ -250,6 +282,7 @@ export default function Chat() {
 
       <form onSubmit={handleSubmit} className="chat-input-form">
         <input
+          ref={inputRef}
           type="text"
           value={message}
           onChange={(e) => setMessage(e.target.value)}

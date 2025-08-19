@@ -67,10 +67,11 @@ export default function ApiKeys() {
         </form>
       )}
 
-      <div className="api-keys-list">
-        {apiKeys.length === 0 ? (
-          <p className="empty-state">No API keys configured</p>
-        ) : (
+      <div className="component-content">
+        <div className="api-keys-list">
+          {apiKeys.length === 0 ? (
+            <p className="empty-state">No API keys configured</p>
+          ) : (
           apiKeys.map((key) => (
             <div key={key.provider} className="api-key-item">
               <div className="api-key-info">
@@ -90,7 +91,8 @@ export default function ApiKeys() {
               </button>
             </div>
           ))
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

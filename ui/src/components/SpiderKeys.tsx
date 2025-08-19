@@ -79,10 +79,11 @@ export default function SpiderKeys() {
         </form>
       )}
 
-      <div className="spider-keys-list">
-        {spiderKeys.length === 0 ? (
-          <p className="empty-state">No Spider API keys generated</p>
-        ) : (
+      <div className="component-content">
+        <div className="spider-keys-list">
+          {spiderKeys.length === 0 ? (
+            <p className="empty-state">No Spider API keys generated</p>
+          ) : (
           spiderKeys.map((key) => (
             <div key={key.key} className="spider-key-item">
               <div className="spider-key-info">
@@ -100,7 +101,8 @@ export default function SpiderKeys() {
               </button>
             </div>
           ))
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

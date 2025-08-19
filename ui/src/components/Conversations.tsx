@@ -8,6 +8,14 @@ export default function Conversations() {
     loadConversations();
   }, [loadConversations]);
 
+  const handleSelectConversation = async (id: string) => {
+    await loadConversation(id);
+    // Switch to Chat tab after loading conversation
+    if ((window as any).switchToChat) {
+      (window as any).switchToChat();
+    }
+  };
+
   return (
     <div className="component-container">
       <div className="component-header">
@@ -21,15 +29,16 @@ export default function Conversations() {
         </button>
       </div>
 
-      <div className="conversations-list">
-        {conversations.length === 0 ? (
-          <p className="empty-state">No conversations yet</p>
-        ) : (
+      <div className="component-content">
+        <div className="conversations-list">
+          {conversations.length === 0 ? (
+            <p className="empty-state">No conversations yet</p>
+          ) : (
           conversations.map((conv) => (
             <div 
               key={conv.id} 
               className="conversation-item"
-              onClick={() => loadConversation(conv.id)}
+              onClick={() => handleSelectConversation(conv.id)}
             >
               <div className="conversation-info">
                 <h3>Conversation {conv.id.substring(0, 8)}...</h3>
@@ -40,7 +49,8 @@ export default function Conversations() {
               </div>
             </div>
           ))
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
