@@ -6,6 +6,7 @@ import { Message, ConversationMetadata, ChatResponse } from '@caller-utils';
 export type WsClientMessage = 
   | AuthMessage 
   | ChatMessage 
+  | CancelMessage
   | PingMessage;
 
 export interface AuthMessage {
@@ -21,6 +22,10 @@ export interface ChatMessage {
     mcpServers?: string[];
     metadata?: ConversationMetadata;
   };
+}
+
+export interface CancelMessage {
+  type: 'cancel';
 }
 
 export interface PingMessage {

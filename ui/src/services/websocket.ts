@@ -4,6 +4,7 @@ import {
   WsServerMessage,
   AuthMessage,
   ChatMessage,
+  CancelMessage,
   PingMessage 
 } from '../types/websocket';
 
@@ -104,6 +105,17 @@ class WebSocketService {
       }
     };
     this.send(chatMsg);
+  }
+  
+  sendCancel(): void {
+    if (!this.isAuthenticated) {
+      throw new Error('Not authenticated');
+    }
+    
+    const cancelMsg: CancelMessage = {
+      type: 'cancel'
+    };
+    this.send(cancelMsg);
   }
   
   send(data: WsClientMessage): void {

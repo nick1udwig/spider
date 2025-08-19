@@ -22,6 +22,8 @@ use chrono::Utc;
 use std::pin::Pin;
 use std::future::Future;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct SpiderState {
@@ -37,9 +39,13 @@ pub struct SpiderState {
     #[serde(skip)]
     pending_mcp_requests: HashMap<String, PendingMcpRequest>, // request_id -> pending request
     #[serde(skip)]
+    tool_responses: HashMap<String, Value>, // request_id -> response received from MCP
+    #[serde(skip)]
     next_channel_id: u32,
     #[serde(skip)]
     chat_clients: HashMap<u32, ChatClient>,  // channel_id -> chat client connection
+    #[serde(skip)]
+    active_chat_cancellation: HashMap<u32, Arc<AtomicBool>>,  // channel_id -> cancellation flag
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +266,8 @@ enum WsClientMessage {
     Chat { 
         payload: WsChatPayload 
     },
+    #[serde(rename = "cancel")]
+    Cancel,
     #[serde(rename = "ping")]
     Ping,
 }
@@ -450,6 +458,21 @@ impl SpiderState {
                                     // Not authenticated
                                     let response = WsServerMessage::Error {
                                         error: "Not authenticated. Please send auth message first.".to_string(),
+                                    };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                }
+                            }
+                            WsClientMessage::Cancel => {
+                                // Cancel any active chat request for this channel
+                                if let Some(cancel_flag) = self.active_chat_cancellation.get(&channel_id) {
+                                    cancel_flag.store(true, Ordering::Relaxed);
+                                    println!("Spider: Cancelling chat request for channel {}", channel_id);
+                                    
+                                    // Send cancellation confirmation
+                                    let response = WsServerMessage::Status {
+                                        status: "cancelled".to_string(),
+                                        message: Some("Request cancelled".to_string()),
                                     };
                                     let json = serde_json::to_string(&response).unwrap();
                                     send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
@@ -825,6 +848,10 @@ impl SpiderState {
 
     // Streaming version of chat for WebSocket clients
     async fn process_chat_request_with_streaming(&mut self, request: ChatRequest, channel_id: u32) -> Result<ChatResponse, String> {
+        // Create a cancellation flag for this request
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.active_chat_cancellation.insert(channel_id, cancel_flag.clone());
+        
         // Send initial status
         let status_msg = WsServerMessage::Status {
             status: "processing".to_string(),
@@ -836,6 +863,9 @@ impl SpiderState {
         // Use the regular chat processing but send streaming updates
         let result = self.process_chat_internal(request, Some(channel_id)).await;
 
+        // Clean up cancellation flag
+        self.active_chat_cancellation.remove(&channel_id);
+        
         // Send completion status
         let status_msg = WsServerMessage::Status {
             status: "complete".to_string(),
@@ -903,9 +933,18 @@ impl SpiderState {
 
         let response = loop {
             iteration_count += 1;
-
-            // Send streaming update if WebSocket channel provided
+            
+            // Check for cancellation
             if let Some(ch_id) = channel_id {
+                if let Some(cancel_flag) = self.active_chat_cancellation.get(&ch_id) {
+                    let is_cancelled = cancel_flag.load(Ordering::Relaxed);
+                    if is_cancelled {
+                        println!("Spider: Chat request cancelled at iteration {}", iteration_count);
+                        return Err("Request cancelled by user".to_string());
+                    }
+                }
+                
+                // Send streaming update
                 let stream_msg = WsServerMessage::Stream {
                     iteration: iteration_count,
                     message: format!("Processing iteration {}...", iteration_count),
@@ -1242,11 +1281,23 @@ impl SpiderState {
     }
 
     fn handle_tool_call_response(&mut self, pending: &PendingMcpRequest, message: &Value) {
-        // TODO: Route tool call results back to the appropriate conversation
-        println!("Spider: Received tool call response for conversation {:?}: {:?}",
-                 pending.conversation_id, message);
+        println!("Spider: Received tool call response for request {}: {:?}",
+                 pending.request_id, message);
 
-        // This will be implemented when we handle tool calls in chat
+        // Store the response so execute_mcp_tool can retrieve it
+        let result = if let Some(result_value) = message.get("result") {
+            result_value.clone()
+        } else if let Some(error) = message.get("error") {
+            serde_json::json!({
+                "error": error
+            })
+        } else {
+            serde_json::json!({
+                "error": "Invalid MCP response format"
+            })
+        };
+        
+        self.tool_responses.insert(pending.request_id.clone(), result);
     }
 
     async fn discover_mcp_tools(&self, transport: &TransportConfig) -> Result<Vec<Tool>, String> {
@@ -1308,6 +1359,7 @@ impl SpiderState {
             "stdio" | "websocket" => {
                 // Execute via WebSocket
                 let request_id = format!("tool_{}_{}", channel_id, Uuid::new_v4());
+                
                 let tool_request = serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "tools/call",
@@ -1323,25 +1375,47 @@ impl SpiderState {
                     request_id.clone(),
                     PendingMcpRequest {
                         request_id: request_id.clone(),
-                        conversation_id,
+                        conversation_id: conversation_id.clone(),
                         server_id: server_id.to_string(),
                         request_type: McpRequestType::ToolCall { tool_name: tool_name.to_string() },
                     }
                 );
 
-                // Send the tool call
+                // Send the tool call to MCP server
+                println!("Spider: Sending tool call {} to MCP server {} with request_id {}", tool_name, server_id, request_id);
                 let blob = LazyLoadBlob::new(Some("application/json"), tool_request.to_string().into_bytes());
                 send_ws_client_push(channel_id, WsMessageType::Text, blob);
-
-                // For now, return a placeholder response
-                // In a production system, we would wait for the response asynchronously
-                // and route it back to the appropriate conversation
-                Ok(serde_json::json!({
-                    "status": "executing",
-                    "request_id": request_id,
-                    "tool": tool_name,
-                    "server": server_id
-                }))
+                
+                // Wait for response with async polling
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(60);
+                
+                loop {
+                    // Check if we have a response
+                    if let Some(response) = self.tool_responses.remove(&request_id) {
+                        self.pending_mcp_requests.remove(&request_id);
+                        
+                        // Parse the MCP result
+                        if let Some(content) = response.get("content") {
+                            return Ok(serde_json::json!({
+                                "result": content,
+                                "success": true
+                            }));
+                        } else {
+                            return Ok(response);
+                        }
+                    }
+                    
+                    // Check timeout
+                    if start.elapsed() > timeout {
+                        self.pending_mcp_requests.remove(&request_id);
+                        return Err(format!("Tool call {} timed out after 60 seconds", tool_name));
+                    }
+                    
+                    // Sleep briefly to yield to other tasks
+                    // This allows the event loop to process incoming messages
+                    let _ = hyperware_process_lib::hyperapp::sleep(100).await;
+                }
             }
             "http" => {
                 // Execute via HTTP

@@ -590,6 +590,22 @@ input:focus, textarea:focus {
   color: var(--text-primary);
 }
 
+.copy-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.copy-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--primary-color);
+  background: var(--surface);
+}
+
 /* WebSocket status indicator */
 .ws-status {
   display: inline-flex;

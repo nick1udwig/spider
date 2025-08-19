@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useSpiderStore } from '../store/spider';
 import ReactMarkdown from 'react-markdown';
+import { webSocketService } from '../services/websocket';
 
 interface ToolCall {
   id: string;
@@ -18,6 +19,14 @@ function ToolCallModal({ toolCall, toolResult, onClose }: {
   toolResult?: ToolResult;
   onClose: () => void;
 }) {
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      // Could add a toast notification here
+    }).catch(err => {
+      console.error('Failed to copy:', err);
+    });
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -27,14 +36,38 @@ function ToolCallModal({ toolCall, toolResult, onClose }: {
         </div>
         <div className="modal-body">
           <div className="modal-section">
-            <h4>Tool Call</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4>Tool Call</h4>
+              <button 
+                className="btn-icon copy-btn"
+                onClick={() => copyToClipboard(JSON.stringify(toolCall, null, 2))}
+                title="Copy to clipboard"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+              </button>
+            </div>
             <pre className="json-display">
               {JSON.stringify(toolCall, null, 2)}
             </pre>
           </div>
           {toolResult && (
             <div className="modal-section">
-              <h4>Tool Result</h4>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h4>Tool Result</h4>
+                <button 
+                  className="btn-icon copy-btn"
+                  onClick={() => copyToClipboard(JSON.stringify(toolResult, null, 2))}
+                  title="Copy to clipboard"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                </button>
+              </div>
               <pre className="json-display">
                 {JSON.stringify(toolResult, null, 2)}
               </pre>
@@ -86,14 +119,21 @@ export default function Chat() {
   };
 
   const handleCancel = () => {
+    // Cancel HTTP request if using HTTP
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    
+    // Cancel WebSocket request if using WebSocket
+    if (useWebSocket && wsConnected) {
+      webSocketService.sendCancel();
+    }
+    
+    // Update store state
     if (cancelRequest) {
       cancelRequest();
     }
-    // Don't start a new conversation, just cancel the current request
   };
 
   const handleNewConversation = () => {
@@ -142,21 +182,12 @@ export default function Chat() {
 
           return (
             <React.Fragment key={index}>
-              {msg.role !== 'tool' && (
+              {msg.role !== 'tool' && (msg.content && msg.content.trim() && msg.content !== '[Tool calls pending]') && (
                 <div className={`message message-${msg.role}`}>
                   <div className="message-role">{msg.role}</div>
-                  {(msg.content && msg.content.trim() && msg.content !== '[Tool calls pending]') ? (
-                    <div className="message-content">
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
-                    </div>
-                  ) : (
-                    // If no content but has tool calls, show a placeholder
-                    (toolCalls && toolCalls.length > 0) ? (
-                      <div className="message-content">
-                        <em>Using tools...</em>
-                      </div>
-                    ) : null
-                  )}
+                  <div className="message-content">
+                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  </div>
                 </div>
               )}
 
