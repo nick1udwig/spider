@@ -53,7 +53,9 @@ export default function Chat() {
     error,
     sendMessage,
     clearActiveConversation,
-    cancelRequest
+    cancelRequest,
+    wsConnected,
+    useWebSocket
   } = useSpiderStore();
   const [message, setMessage] = useState('');
   const [selectedToolCall, setSelectedToolCall] = useState<{call: ToolCall, result?: ToolResult} | null>(null);
@@ -102,17 +104,27 @@ export default function Chat() {
     <div className="chat-container">
       <div className="chat-header">
         <h2>Chat</h2>
-        <button
-          onClick={handleNewConversation}
-          className="btn btn-icon new-conversation-btn"
-          title="New Conversation"
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M12 20h9"/>
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-            <path d="M15 5L19 9"/>
-          </svg>
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {useWebSocket && (
+            <span 
+              className={`ws-status ${wsConnected ? 'ws-connected' : 'ws-disconnected'}`}
+              title={wsConnected ? 'WebSocket connected - messages update in real-time' : 'WebSocket disconnected - using HTTP'}
+            >
+              {wsConnected ? '🟢' : '🔴'} {wsConnected ? 'Live' : 'HTTP'}
+            </span>
+          )}
+          <button
+            onClick={handleNewConversation}
+            className="btn btn-icon new-conversation-btn"
+            title="New Conversation"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 20h9"/>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+              <path d="M15 5L19 9"/>
+            </svg>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -133,10 +145,17 @@ export default function Chat() {
               {msg.role !== 'tool' && (
                 <div className={`message message-${msg.role}`}>
                   <div className="message-role">{msg.role}</div>
-                  {msg.content && (
+                  {(msg.content && msg.content.trim() && msg.content !== '[Tool calls pending]') ? (
                     <div className="message-content">
                       <ReactMarkdown>{msg.content}</ReactMarkdown>
                     </div>
+                  ) : (
+                    // If no content but has tool calls, show a placeholder
+                    (toolCalls && toolCalls.length > 0) ? (
+                      <div className="message-content">
+                        <em>Using tools...</em>
+                      </div>
+                    ) : null
                   )}
                 </div>
               )}
@@ -177,7 +196,7 @@ export default function Chat() {
             <p>Start a conversation by typing a message below</p>
           </div>
         )}
-        {isLoading && (
+        {isLoading && activeConversation && (
           <div className="message message-assistant message-thinking">
             <div className="message-role">assistant</div>
             <div className="message-content">

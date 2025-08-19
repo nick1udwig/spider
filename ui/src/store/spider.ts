@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import * as api from '../utils/api';
+import { webSocketService } from '../services/websocket';
+import { WsServerMessage } from '../types/websocket';
 
 interface ApiKeyInfo {
   provider: string;
@@ -73,6 +75,8 @@ interface SpiderStore {
   isConnected: boolean;
   nodeId: string;
   currentRequestId: string | null;
+  useWebSocket: boolean;
+  wsConnected: boolean;
   
   // Actions
   initialize: () => Promise<void>;
@@ -95,6 +99,9 @@ interface SpiderStore {
   loadConfig: () => Promise<void>;
   updateConfig: (config: Partial<SpiderConfig>) => Promise<void>;
   clearError: () => void;
+  toggleWebSocket: () => Promise<void>;
+  connectWebSocket: () => Promise<void>;
+  disconnectWebSocket: () => void;
 }
 
 export const useSpiderStore = create<SpiderStore>((set, get) => ({
@@ -114,6 +121,8 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
   isConnected: false,
   nodeId: '',
   currentRequestId: null,
+  useWebSocket: true,  // Default to WebSocket for progressive updates
+  wsConnected: false,
 
   // Actions
   initialize: async () => {
@@ -140,6 +149,11 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
         get().loadMcpServers(),
         get().loadConfig(),
       ]);
+      
+      // Try to connect WebSocket for progressive updates
+      if (get().useWebSocket) {
+        await get().connectWebSocket();
+      }
       
       set({ isLoading: false });
     } catch (error: any) {
@@ -300,7 +314,20 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
       conversation.messages.push(userMessage);
       set({ activeConversation: { ...conversation } });
       
-      // Use the admin GUI key for chat
+      // Check if we should use WebSocket
+      if (get().useWebSocket && webSocketService.isReady) {
+        // Send via WebSocket for progressive updates
+        webSocketService.sendChatMessage(
+          conversation.messages,
+          conversation.llmProvider,
+          conversation.mcpServers,
+          conversation.metadata
+        );
+        // WebSocket responses will be handled by the message handler
+        return;
+      }
+      
+      // Fallback to HTTP
       const apiKey = 'sp_admin_gui_key';
       
       // Send to backend with abort signal support
@@ -403,4 +430,94 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+  
+  toggleWebSocket: async () => {
+    const newState = !get().useWebSocket;
+    set({ useWebSocket: newState });
+    
+    if (newState) {
+      await get().connectWebSocket();
+    } else {
+      get().disconnectWebSocket();
+    }
+  },
+  
+  connectWebSocket: async () => {
+    try {
+      // Determine WebSocket URL based on current location and BASE_URL
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      const baseUrl = import.meta.env.BASE_URL || '/';
+      const wsPath = baseUrl.endsWith('/') ? `${baseUrl}ws` : `${baseUrl}/ws`;
+      const wsUrl = `${protocol}//${host}${wsPath}`;
+      
+      console.log('Connecting to WebSocket at:', wsUrl);
+      await webSocketService.connect(wsUrl);
+      
+      // Set up message handler for progressive updates
+      webSocketService.addMessageHandler((message: WsServerMessage) => {
+        const state = get();
+        
+        switch (message.type) {
+          case 'message':
+            // Progressive message update from tool loop
+            if (state.activeConversation && message.message) {
+              const updatedConversation = { ...state.activeConversation };
+              updatedConversation.messages.push(message.message);
+              set({ activeConversation: updatedConversation });
+            }
+            break;
+            
+          case 'chat_complete':
+            // Final response received
+            if (state.activeConversation && message.payload) {
+              const updatedConversation = { ...state.activeConversation };
+              updatedConversation.id = message.payload.conversationId;
+              
+              // Update conversations list
+              const conversations = [...state.conversations];
+              const existingIndex = conversations.findIndex(c => c.id === updatedConversation.id);
+              if (existingIndex >= 0) {
+                conversations[existingIndex] = updatedConversation;
+              } else {
+                conversations.unshift(updatedConversation);
+              }
+              
+              set({ 
+                activeConversation: updatedConversation,
+                conversations,
+                isLoading: false,
+                currentRequestId: null
+              });
+            }
+            break;
+            
+          case 'error':
+            set({ 
+              error: message.error || 'WebSocket error occurred',
+              isLoading: false,
+              currentRequestId: null
+            });
+            break;
+        }
+      });
+      
+      // Authenticate with the Spider API key
+      await webSocketService.authenticate('sp_admin_gui_key');
+      
+      set({ wsConnected: true });
+    } catch (error: any) {
+      console.error('Failed to connect WebSocket:', error);
+      set({ 
+        wsConnected: false, 
+        useWebSocket: false,
+        error: 'Failed to connect WebSocket. Falling back to HTTP.'
+      });
+    }
+  },
+  
+  disconnectWebSocket: () => {
+    webSocketService.disconnect();
+    set({ wsConnected: false });
+  },
 }));

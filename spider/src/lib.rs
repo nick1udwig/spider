@@ -247,6 +247,72 @@ struct ProcessResponse {
     data: String,
 }
 
+// WebSocket Message Types
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+enum WsClientMessage {
+    #[serde(rename = "auth")]
+    Auth { 
+        #[serde(rename = "apiKey")]
+        api_key: String 
+    },
+    #[serde(rename = "chat")]
+    Chat { 
+        payload: WsChatPayload 
+    },
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct WsChatPayload {
+    messages: Vec<Message>,
+    #[serde(rename = "llmProvider")]
+    llm_provider: Option<String>,
+    #[serde(rename = "mcpServers")]
+    mcp_servers: Option<Vec<String>>,
+    metadata: Option<ConversationMetadata>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+enum WsServerMessage {
+    #[serde(rename = "auth_success")]
+    AuthSuccess { 
+        message: String 
+    },
+    #[serde(rename = "auth_error")]
+    AuthError { 
+        error: String 
+    },
+    #[serde(rename = "status")]
+    Status { 
+        status: String,
+        message: Option<String> 
+    },
+    #[serde(rename = "stream")]
+    Stream {
+        iteration: u32,
+        message: String,
+        #[serde(rename = "tool_calls")]
+        tool_calls: Option<String>,
+    },
+    #[serde(rename = "message")]
+    Message { 
+        message: Message 
+    },
+    #[serde(rename = "chat_complete")]
+    ChatComplete { 
+        payload: ChatResponse 
+    },
+    #[serde(rename = "error")]
+    Error { 
+        error: String 
+    },
+    #[serde(rename = "pong")]
+    Pong,
+}
+
 #[hyperprocess(
     name = "Spider",
     ui = Some(HttpBindingConfig::default()),
@@ -254,6 +320,10 @@ struct ProcessResponse {
         Binding::Http {
             path: "/api",
             config: HttpBindingConfig::new(false, false, false, None)
+        },
+        Binding::Ws {
+            path: "/ws",
+            config: WsBindingConfig::new(false, false, false),
         }
     ],
     save_config = hyperware_process_lib::hyperapp::SaveOptions::OnDiff,
@@ -262,11 +332,11 @@ struct ProcessResponse {
 impl SpiderState {
     #[init]
     async fn initialize(&mut self) {
-        add_to_homepage("Spider", Some("🕷️"), Some("/"), None);
+        add_to_homepage("Spider", None, Some("/"), None);
 
         self.default_llm_provider = "anthropic".to_string();
         self.max_tokens = 4096;
-        self.temperature = 0.7;
+        self.temperature = 1.0;
         self.next_channel_id = 1000; // Start channel IDs at 1000
 
         let our_node = our().node.clone();
@@ -290,213 +360,126 @@ impl SpiderState {
 
         // Auto-reconnect to MCP servers that exist in state
         // Note: Don't filter by server.connected since they won't be connected on startup
-        let servers_to_reconnect: Vec<McpServer> = self.mcp_servers
+        let servers_to_reconnect: Vec<String> = self.mcp_servers
             .iter()
-            .cloned()
+            .map(|s| s.id.clone())
             .collect();
 
-        for server in servers_to_reconnect {
-            println!("Auto-reconnecting to MCP server: {}", server.id);
+        for server_id in servers_to_reconnect {
+            println!("Auto-reconnecting to MCP server: {}", server_id);
 
-            // Connect based on transport type
-            if server.transport.transport_type == "websocket" || server.transport.transport_type == "stdio" {
-                // Get WebSocket URL
-                let ws_url = server.transport.url.clone()
-                    .unwrap_or_else(|| "ws://localhost:10125".to_string());
-
-                // Generate a new channel ID for this connection
-                let channel_id = self.next_channel_id;
-                self.next_channel_id += 1;
-
-                // Open WebSocket connection
-                match open_ws_connection(ws_url.clone(), None, channel_id).await {
-                    Ok(_) => {
-                        println!("Successfully initiated WebSocket connection to MCP server {}", server.id);
-
-                        // Store connection info
-                        self.ws_connections.insert(channel_id, WsConnection {
-                            server_id: server.id.clone(),
-                            server_name: server.name.clone(),
-                            channel_id,
-                            tools: Vec::new(),
-                            initialized: false,
-                        });
-
-                        // Send initialize request
-                        let init_request = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "initialize",
-                            "params": {
-                                "protocolVersion": "2024-11-05",
-                                "clientInfo": {
-                                    "name": "spider",
-                                    "version": "1.0.0"
-                                },
-                                "capabilities": {}
-                            },
-                            "id": format!("init_{}", channel_id)
-                        });
-
-                        // Store pending request
-                        self.pending_mcp_requests.insert(
-                            format!("init_{}", channel_id),
-                            PendingMcpRequest {
-                                request_id: format!("init_{}", channel_id),
-                                conversation_id: None,
-                                server_id: server.id.clone(),
-                                request_type: McpRequestType::Initialize,
-                            }
-                        );
-
-                        // Send the initialize request via WebSocket
-                        let message = LazyLoadBlob::new(
-                            Some("application/json".to_string()),
-                            init_request.to_string().into_bytes()
-                        );
-
-                        send_ws_push(channel_id, WsMessageType::Text, message);
-                        println!("Sent initialize request to MCP server {} (channel {})", server.id, channel_id);
-                    }
-                    Err(e) => {
-                        println!("Failed to auto-reconnect to MCP server {}: {:?}", server.id, e);
-                        if let Some(s) = self.mcp_servers.iter_mut().find(|s| s.id == server.id) {
-                            s.connected = false;
-                        }
-                    }
+            // Use the same connect_mcp_server method that the frontend uses
+            match self.connect_mcp_server(server_id.clone()).await {
+                Ok(msg) => {
+                    println!("Auto-reconnect successful: {}", msg);
                 }
-            } else {
-                println!("Unsupported transport type for auto-reconnect: {}", server.transport.transport_type);
+                Err(e) => {
+                    println!("Failed to auto-reconnect to MCP server {}: {}", server_id, e);
+                }
             }
         }
     }
 
     #[ws]
     async fn handle_websocket(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
-        // Handle WebSocket messages - could be either chat client or MCP server
-        // Determine by checking if it's an existing MCP connection
+        println!("handle_websocket {channel_id}");
+        
+        match message_type {
+            WsMessageType::Text | WsMessageType::Binary => {
+                let message_bytes = blob.bytes.clone();
+                let message_str = String::from_utf8(message_bytes).unwrap_or_default();
+                println!("handle_websocket: got {message_str}");
 
-        if self.ws_connections.contains_key(&channel_id) {
-            // Handle as MCP server connection
-            match message_type {
-                WsMessageType::Text | WsMessageType::Binary => {
-                    let message_bytes = blob.bytes.clone();
-                    let message_str = String::from_utf8(message_bytes).unwrap_or_default();
-                    if let Ok(json_msg) = serde_json::from_str::<Value>(&message_str) {
-                        self.handle_mcp_message(channel_id, json_msg);
-                    }
-                }
-                WsMessageType::Close => {
-                    // Handle disconnection
-                    if let Some(conn) = self.ws_connections.remove(&channel_id) {
-                        println!("MCP server {} disconnected", conn.server_name);
-                        // Update server status
-                        if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == conn.server_id) {
-                            server.connected = false;
-                        }
-                    }
-                }
-                WsMessageType::Ping | WsMessageType::Pong => {
-                    // Ignore ping/pong
-                }
-            }
-        } else {
-            // Handle as potential chat client
-            match message_type {
-                WsMessageType::Text | WsMessageType::Binary => {
-                    let message_bytes = blob.bytes.clone();
-                    let message_str = String::from_utf8(message_bytes).unwrap_or_default();
-
-                    // Parse the incoming message
-                    if let Ok(json_msg) = serde_json::from_str::<Value>(&message_str) {
-                        // Handle different message types
-                        if let Some(msg_type) = json_msg.get("type").and_then(|v| v.as_str()) {
-                            match msg_type {
-                                "auth" => {
-                                    // Authenticate the client
-                                    if let Some(api_key) = json_msg.get("apiKey").and_then(|v| v.as_str()) {
-                                        if self.validate_spider_key(api_key) {
-                                            self.chat_clients.insert(channel_id, ChatClient {
-                                                channel_id,
-                                                api_key: api_key.to_string(),
-                                                conversation_id: None,
-                                                connected_at: Utc::now().timestamp() as u64,
-                                            });
-
-                                            // Send auth success response
-                                            let response = serde_json::json!({
-                                                "type": "auth_success",
-                                                "message": "Authenticated successfully"
-                                            });
-                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
-                                        } else {
-                                            // Send auth failure and close connection
-                                            let response = serde_json::json!({
-                                                "type": "auth_error",
-                                                "error": "Invalid API key"
-                                            });
-                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
-                                            send_ws_push(channel_id, WsMessageType::Close, LazyLoadBlob::default());
-                                        }
-                                    }
-                                }
-                                "chat" => {
-                                    // Process chat message
-                                    if let Some(client) = self.chat_clients.get(&channel_id).cloned() {
-                                        if let Ok(mut chat_request) = serde_json::from_value::<ChatRequest>(json_msg.get("payload").cloned().unwrap_or_default()) {
-                                            // Set the API key from the authenticated client
-                                            chat_request.api_key = client.api_key;
-
-                                            // Process the chat request asynchronously
-                                            match self.process_chat_request_with_streaming(chat_request, channel_id).await {
-                                                Ok(response) => {
-                                                    // Send final response
-                                                    let ws_response = serde_json::json!({
-                                                        "type": "chat_complete",
-                                                        "payload": response
-                                                    });
-                                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), ws_response.to_string()));
-                                                }
-                                                Err(e) => {
-                                                    let error_response = serde_json::json!({
-                                                        "type": "error",
-                                                        "error": e
-                                                    });
-                                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), error_response.to_string()));
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // Not authenticated
-                                        let response = serde_json::json!({
-                                            "type": "error",
-                                            "error": "Not authenticated. Please send auth message first."
-                                        });
-                                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
-                                    }
-                                }
-                                "ping" => {
-                                    // Respond to ping with pong
-                                    let response = serde_json::json!({
-                                        "type": "pong"
+                // Parse the incoming message using typed enum
+                match serde_json::from_str::<WsClientMessage>(&message_str) {
+                    Ok(msg) => {
+                        match msg {
+                            WsClientMessage::Auth { api_key } => {
+                                if self.validate_spider_key(&api_key) {
+                                    self.chat_clients.insert(channel_id, ChatClient {
+                                        channel_id,
+                                        api_key: api_key.clone(),
+                                        conversation_id: None,
+                                        connected_at: Utc::now().timestamp() as u64,
                                     });
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
+
+                                    // Send auth success response
+                                    let response = WsServerMessage::AuthSuccess {
+                                        message: "Authenticated successfully".to_string(),
+                                    };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                } else {
+                                    // Send auth failure and close connection
+                                    let response = WsServerMessage::AuthError {
+                                        error: "Invalid API key".to_string(),
+                                    };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                    send_ws_push(channel_id, WsMessageType::Close, LazyLoadBlob::default());
                                 }
-                                _ => {
-                                    println!("Unknown message type from chat client: {}", msg_type);
+                            }
+                            WsClientMessage::Chat { payload } => {
+                                if let Some(client) = self.chat_clients.get(&channel_id).cloned() {
+                                    // Convert WsChatPayload to ChatRequest
+                                    let chat_request = ChatRequest {
+                                        api_key: client.api_key,
+                                        messages: payload.messages,
+                                        llm_provider: payload.llm_provider,
+                                        mcp_servers: payload.mcp_servers,
+                                        metadata: payload.metadata,
+                                    };
+
+                                    // Process the chat request asynchronously
+                                    match self.process_chat_request_with_streaming(chat_request, channel_id).await {
+                                        Ok(response) => {
+                                            // Send final response
+                                            let ws_response = WsServerMessage::ChatComplete {
+                                                payload: response,
+                                            };
+                                            let json = serde_json::to_string(&ws_response).unwrap();
+                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                        }
+                                        Err(e) => {
+                                            let error_response = WsServerMessage::Error { error: e };
+                                            let json = serde_json::to_string(&error_response).unwrap();
+                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                        }
+                                    }
+                                } else {
+                                    // Not authenticated
+                                    let response = WsServerMessage::Error {
+                                        error: "Not authenticated. Please send auth message first.".to_string(),
+                                    };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
                                 }
+                            }
+                            WsClientMessage::Ping => {
+                                // Respond to ping with pong
+                                let response = WsServerMessage::Pong;
+                                let json = serde_json::to_string(&response).unwrap();
+                                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
                             }
                         }
                     }
+                    Err(e) => {
+                        println!("Spider: Failed to parse WebSocket message from channel {}: {}", channel_id, e);
+                        let error_response = WsServerMessage::Error {
+                            error: format!("Invalid message format: {}", e),
+                        };
+                        let json = serde_json::to_string(&error_response).unwrap();
+                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                    }
                 }
-                WsMessageType::Close => {
-                    // Clean up client connection
-                    self.chat_clients.remove(&channel_id);
-                    println!("Chat client {} disconnected", channel_id);
-                }
-                WsMessageType::Ping | WsMessageType::Pong => {
-                    // Handle ping/pong for keepalive
-                }
-
+            }
+            WsMessageType::Close => {
+                // Clean up client connection
+                self.chat_clients.remove(&channel_id);
+                println!("Chat client {} disconnected", channel_id);
+            }
+            WsMessageType::Ping | WsMessageType::Pong => {
+                // Handle ping/pong for keepalive
             }
         }
     }
@@ -843,22 +826,23 @@ impl SpiderState {
     // Streaming version of chat for WebSocket clients
     async fn process_chat_request_with_streaming(&mut self, request: ChatRequest, channel_id: u32) -> Result<ChatResponse, String> {
         // Send initial status
-        let status_msg = serde_json::json!({
-            "type": "status",
-            "status": "processing",
-            "message": "Starting chat processing..."
-        });
-        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), status_msg.to_string()));
+        let status_msg = WsServerMessage::Status {
+            status: "processing".to_string(),
+            message: Some("Starting chat processing...".to_string()),
+        };
+        let json = serde_json::to_string(&status_msg).unwrap();
+        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
 
         // Use the regular chat processing but send streaming updates
         let result = self.process_chat_internal(request, Some(channel_id)).await;
 
         // Send completion status
-        let status_msg = serde_json::json!({
-            "type": "status",
-            "status": "complete"
-        });
-        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), status_msg.to_string()));
+        let status_msg = WsServerMessage::Status {
+            status: "complete".to_string(),
+            message: None,
+        };
+        let json = serde_json::to_string(&status_msg).unwrap();
+        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
 
         result
     }
@@ -922,12 +906,13 @@ impl SpiderState {
 
             // Send streaming update if WebSocket channel provided
             if let Some(ch_id) = channel_id {
-                let stream_msg = serde_json::json!({
-                    "type": "stream",
-                    "iteration": iteration_count,
-                    "message": format!("Processing iteration {}...", iteration_count)
-                });
-                send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), stream_msg.to_string()));
+                let stream_msg = WsServerMessage::Stream {
+                    iteration: iteration_count,
+                    message: format!("Processing iteration {}...", iteration_count),
+                    tool_calls: None,
+                };
+                let json = serde_json::to_string(&stream_msg).unwrap();
+                send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
             }
 
             // Call the LLM with available tools using the provider abstraction
@@ -960,27 +945,27 @@ impl SpiderState {
 
                 // Send streaming update for tool calls
                 if let Some(ch_id) = channel_id {
-                    let stream_msg = serde_json::json!({
-                        "type": "stream",
-                        "iteration": iteration_count,
-                        "message": "Executing tool calls...",
-                        "tool_calls": tool_calls_json
-                    });
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), stream_msg.to_string()));
+                    let stream_msg = WsServerMessage::Stream {
+                        iteration: iteration_count,
+                        message: "Executing tool calls...".to_string(),
+                        tool_calls: Some(tool_calls_json.clone()),
+                    };
+                    let json = serde_json::to_string(&stream_msg).unwrap();
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
                 }
 
                 let tool_results = self.process_tool_calls(tool_calls_json, Some(conversation_id.clone())).await?;
 
                 // Add the assistant's message with tool calls
                 working_messages.push(llm_response.clone());
-                
+
                 // Send the assistant message with tool calls to the client
                 if let Some(ch_id) = channel_id {
-                    let msg_update = serde_json::json!({
-                        "type": "message",
-                        "message": llm_response.clone()
-                    });
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), msg_update.to_string()));
+                    let msg_update = WsServerMessage::Message {
+                        message: llm_response.clone(),
+                    };
+                    let json = serde_json::to_string(&msg_update).unwrap();
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
                 }
 
                 // Add tool results as a new message for the LLM to see
@@ -992,14 +977,14 @@ impl SpiderState {
                     timestamp: Utc::now().timestamp() as u64,
                 };
                 working_messages.push(tool_message.clone());
-                
+
                 // Send the tool results message to the client
                 if let Some(ch_id) = channel_id {
-                    let msg_update = serde_json::json!({
-                        "type": "message",
-                        "message": tool_message
-                    });
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), msg_update.to_string()));
+                    let msg_update = WsServerMessage::Message {
+                        message: tool_message.clone(),
+                    };
+                    let json = serde_json::to_string(&msg_update).unwrap();
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
                 }
 
                 // Continue the loop - the agent will decide what to do next
@@ -1011,11 +996,11 @@ impl SpiderState {
 
                 // Send the final assistant message to the client
                 if let Some(ch_id) = channel_id {
-                    let msg_update = serde_json::json!({
-                        "type": "message",
-                        "message": llm_response.clone()
-                    });
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), msg_update.to_string()));
+                    let msg_update = WsServerMessage::Message {
+                        message: llm_response.clone(),
+                    };
+                    let json = serde_json::to_string(&msg_update).unwrap();
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
                 }
 
                 break llm_response;
@@ -1035,7 +1020,7 @@ impl SpiderState {
         // (everything after the initial user messages)
         let initial_message_count = request.messages.len();
         let new_messages = working_messages[initial_message_count..].to_vec();
-        
+
         let conversation = Conversation {
             id: conversation_id.clone(),
             messages: working_messages,

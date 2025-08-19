@@ -50,6 +50,7 @@ export default defineConfig({
       [`^${BASE_URL}/(?!(@vite/client|src/.*|node_modules/.*|@react-refresh|$))`]: {
         target: PROXY_URL,
         changeOrigin: true,
+        ws: true, // Enable WebSocket proxy
       },
       // '/example': {
       //   target: PROXY_URL,

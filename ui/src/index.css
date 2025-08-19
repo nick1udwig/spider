@@ -590,6 +590,27 @@ input:focus, textarea:focus {
   color: var(--text-primary);
 }
 
+/* WebSocket status indicator */
+.ws-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.ws-connected {
+  background-color: rgba(81, 207, 102, 0.1);
+  color: var(--success-color);
+}
+
+.ws-disconnected {
+  background-color: rgba(255, 107, 107, 0.1);
+  color: var(--error-color);
+}
+
 /* Light mode support */
 @media (prefers-color-scheme: light) {
   :root {

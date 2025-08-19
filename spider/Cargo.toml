@@ -13,6 +13,7 @@ package = "hyperware:process"
 anyhow = "1.0"
 base64 = "0.21"
 chrono = { version = "0.4", features = ["serde"] }
+hyperprocess_macro = { git = "https://github.com/hyperware-ai/hyperprocess-macro", rev = "ed99c19" }
 hyperware-anthropic-sdk = { git = "https://github.com/hyperware-ai/hyperware-anthropic-sdk", rev = "6f50ca7" }
 hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", rev = "753dac3", features = ["hyperapp"] }
 process_macros = "0.1"
@@ -23,9 +24,6 @@ sha2 = "0.10"
 uuid = { version = "1.4.1", features = ["v4", "serde"] }
 wit-bindgen = "0.42.1"
 
-[dependencies.hyperprocess_macro]
-git = "https://github.com/hyperware-ai/hyperprocess-macro"
-rev = "19a2f48"
 
 [dependencies.caller-utils]
 path = "../target/caller-utils"
