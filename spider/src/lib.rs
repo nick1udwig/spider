@@ -7,7 +7,7 @@ use hyperware_process_lib::{
     LazyLoadBlob,
     http::{
         client::{open_ws_connection, send_ws_client_push},
-        server::WsMessageType,
+        server::{WsMessageType, send_ws_push},
     },
 };
 use hyperware_anthropic_sdk::{
@@ -38,6 +38,8 @@ pub struct SpiderState {
     pending_mcp_requests: HashMap<String, PendingMcpRequest>, // request_id -> pending request
     #[serde(skip)]
     next_channel_id: u32,
+    #[serde(skip)]
+    chat_clients: HashMap<u32, ChatClient>,  // channel_id -> chat client connection
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +64,14 @@ enum McpRequestType {
     Initialize,
     ToolsList,
     ToolCall { tool_name: String },
+}
+
+#[derive(Clone, Debug)]
+struct ChatClient {
+    channel_id: u32,
+    api_key: String,
+    conversation_id: Option<String>,
+    connected_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -212,6 +222,8 @@ struct ChatResponse {
     #[serde(rename = "conversationId")]
     conversation_id: String,
     response: Message,
+    #[serde(rename = "allMessages")]
+    all_messages: Vec<Message>,  // Include all messages from the conversation
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -275,6 +287,218 @@ impl SpiderState {
         }
 
         // VFS directory creation will be handled when actually saving files
+
+        // Auto-reconnect to MCP servers that exist in state
+        // Note: Don't filter by server.connected since they won't be connected on startup
+        let servers_to_reconnect: Vec<McpServer> = self.mcp_servers
+            .iter()
+            .cloned()
+            .collect();
+
+        for server in servers_to_reconnect {
+            println!("Auto-reconnecting to MCP server: {}", server.id);
+
+            // Connect based on transport type
+            if server.transport.transport_type == "websocket" || server.transport.transport_type == "stdio" {
+                // Get WebSocket URL
+                let ws_url = server.transport.url.clone()
+                    .unwrap_or_else(|| "ws://localhost:10125".to_string());
+
+                // Generate a new channel ID for this connection
+                let channel_id = self.next_channel_id;
+                self.next_channel_id += 1;
+
+                // Open WebSocket connection
+                match open_ws_connection(ws_url.clone(), None, channel_id).await {
+                    Ok(_) => {
+                        println!("Successfully initiated WebSocket connection to MCP server {}", server.id);
+
+                        // Store connection info
+                        self.ws_connections.insert(channel_id, WsConnection {
+                            server_id: server.id.clone(),
+                            server_name: server.name.clone(),
+                            channel_id,
+                            tools: Vec::new(),
+                            initialized: false,
+                        });
+
+                        // Send initialize request
+                        let init_request = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": "2024-11-05",
+                                "clientInfo": {
+                                    "name": "spider",
+                                    "version": "1.0.0"
+                                },
+                                "capabilities": {}
+                            },
+                            "id": format!("init_{}", channel_id)
+                        });
+
+                        // Store pending request
+                        self.pending_mcp_requests.insert(
+                            format!("init_{}", channel_id),
+                            PendingMcpRequest {
+                                request_id: format!("init_{}", channel_id),
+                                conversation_id: None,
+                                server_id: server.id.clone(),
+                                request_type: McpRequestType::Initialize,
+                            }
+                        );
+
+                        // Send the initialize request via WebSocket
+                        let message = LazyLoadBlob::new(
+                            Some("application/json".to_string()),
+                            init_request.to_string().into_bytes()
+                        );
+
+                        send_ws_push(channel_id, WsMessageType::Text, message);
+                        println!("Sent initialize request to MCP server {} (channel {})", server.id, channel_id);
+                    }
+                    Err(e) => {
+                        println!("Failed to auto-reconnect to MCP server {}: {:?}", server.id, e);
+                        if let Some(s) = self.mcp_servers.iter_mut().find(|s| s.id == server.id) {
+                            s.connected = false;
+                        }
+                    }
+                }
+            } else {
+                println!("Unsupported transport type for auto-reconnect: {}", server.transport.transport_type);
+            }
+        }
+    }
+
+    #[ws]
+    async fn handle_websocket(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
+        // Handle WebSocket messages - could be either chat client or MCP server
+        // Determine by checking if it's an existing MCP connection
+
+        if self.ws_connections.contains_key(&channel_id) {
+            // Handle as MCP server connection
+            match message_type {
+                WsMessageType::Text | WsMessageType::Binary => {
+                    let message_bytes = blob.bytes.clone();
+                    let message_str = String::from_utf8(message_bytes).unwrap_or_default();
+                    if let Ok(json_msg) = serde_json::from_str::<Value>(&message_str) {
+                        self.handle_mcp_message(channel_id, json_msg);
+                    }
+                }
+                WsMessageType::Close => {
+                    // Handle disconnection
+                    if let Some(conn) = self.ws_connections.remove(&channel_id) {
+                        println!("MCP server {} disconnected", conn.server_name);
+                        // Update server status
+                        if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == conn.server_id) {
+                            server.connected = false;
+                        }
+                    }
+                }
+                WsMessageType::Ping | WsMessageType::Pong => {
+                    // Ignore ping/pong
+                }
+            }
+        } else {
+            // Handle as potential chat client
+            match message_type {
+                WsMessageType::Text | WsMessageType::Binary => {
+                    let message_bytes = blob.bytes.clone();
+                    let message_str = String::from_utf8(message_bytes).unwrap_or_default();
+
+                    // Parse the incoming message
+                    if let Ok(json_msg) = serde_json::from_str::<Value>(&message_str) {
+                        // Handle different message types
+                        if let Some(msg_type) = json_msg.get("type").and_then(|v| v.as_str()) {
+                            match msg_type {
+                                "auth" => {
+                                    // Authenticate the client
+                                    if let Some(api_key) = json_msg.get("apiKey").and_then(|v| v.as_str()) {
+                                        if self.validate_spider_key(api_key) {
+                                            self.chat_clients.insert(channel_id, ChatClient {
+                                                channel_id,
+                                                api_key: api_key.to_string(),
+                                                conversation_id: None,
+                                                connected_at: Utc::now().timestamp() as u64,
+                                            });
+
+                                            // Send auth success response
+                                            let response = serde_json::json!({
+                                                "type": "auth_success",
+                                                "message": "Authenticated successfully"
+                                            });
+                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
+                                        } else {
+                                            // Send auth failure and close connection
+                                            let response = serde_json::json!({
+                                                "type": "auth_error",
+                                                "error": "Invalid API key"
+                                            });
+                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
+                                            send_ws_push(channel_id, WsMessageType::Close, LazyLoadBlob::default());
+                                        }
+                                    }
+                                }
+                                "chat" => {
+                                    // Process chat message
+                                    if let Some(client) = self.chat_clients.get(&channel_id).cloned() {
+                                        if let Ok(mut chat_request) = serde_json::from_value::<ChatRequest>(json_msg.get("payload").cloned().unwrap_or_default()) {
+                                            // Set the API key from the authenticated client
+                                            chat_request.api_key = client.api_key;
+
+                                            // Process the chat request asynchronously
+                                            match self.process_chat_request_with_streaming(chat_request, channel_id).await {
+                                                Ok(response) => {
+                                                    // Send final response
+                                                    let ws_response = serde_json::json!({
+                                                        "type": "chat_complete",
+                                                        "payload": response
+                                                    });
+                                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), ws_response.to_string()));
+                                                }
+                                                Err(e) => {
+                                                    let error_response = serde_json::json!({
+                                                        "type": "error",
+                                                        "error": e
+                                                    });
+                                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), error_response.to_string()));
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Not authenticated
+                                        let response = serde_json::json!({
+                                            "type": "error",
+                                            "error": "Not authenticated. Please send auth message first."
+                                        });
+                                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
+                                    }
+                                }
+                                "ping" => {
+                                    // Respond to ping with pong
+                                    let response = serde_json::json!({
+                                        "type": "pong"
+                                    });
+                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), response.to_string()));
+                                }
+                                _ => {
+                                    println!("Unknown message type from chat client: {}", msg_type);
+                                }
+                            }
+                        }
+                    }
+                }
+                WsMessageType::Close => {
+                    // Clean up client connection
+                    self.chat_clients.remove(&channel_id);
+                    println!("Chat client {} disconnected", channel_id);
+                }
+                WsMessageType::Ping | WsMessageType::Pong => {
+                    // Handle ping/pong for keepalive
+                }
+
+            }
+        }
     }
 
     #[ws_client]
@@ -557,134 +781,8 @@ impl SpiderState {
 
     #[http]
     async fn chat(&mut self, request: ChatRequest) -> Result<ChatResponse, String> {
-        // Validate Spider API key
-        if !self.validate_spider_key(&request.api_key) {
-            return Err("Unauthorized: Invalid Spider API key".to_string());
-        }
-
-        // Check permissions
-        let spider_key = self.spider_api_keys.iter()
-            .find(|k| k.key == request.api_key)
-            .ok_or("Unauthorized: Invalid Spider API key")?;
-
-        if !spider_key.permissions.contains(&"chat".to_string()) {
-            return Err("Forbidden: API key lacks chat permission".to_string());
-        }
-
-        let conversation_id = Uuid::new_v4().to_string();
-        let llm_provider = request.llm_provider.unwrap_or(self.default_llm_provider.clone());
-
-        println!("Spider: Starting new conversation {} with provider {} (key: {})",
-                 conversation_id, llm_provider, spider_key.name);
-
-        // Get the API key for the selected provider and decrypt it
-        let encrypted_key = self.api_keys.iter()
-            .find(|(p, _)| p == &llm_provider)
-            .map(|(_, k)| k.key.clone())
-            .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?;
-        let api_key = self.decrypt_key(&encrypted_key);
-
-        // Collect available tools from connected MCP servers
-        let available_tools: Vec<Tool> = if let Some(ref mcp_server_ids) = request.mcp_servers {
-            self.mcp_servers.iter()
-                .filter(|s| s.connected && mcp_server_ids.contains(&s.id))
-                .flat_map(|s| s.tools.clone())
-                .collect()
-        } else {
-            // Use all connected servers if none specified
-            self.mcp_servers.iter()
-                .filter(|s| s.connected)
-                .flat_map(|s| s.tools.clone())
-                .collect()
-        };
-
-        // Start the agentic loop - runs indefinitely until the agent stops making tool calls
-        let mut working_messages = request.messages.clone();
-        let mut iteration_count = 0;
-
-        let response = loop {
-            iteration_count += 1;
-
-            // Call the LLM with available tools using the provider abstraction
-            let provider = create_llm_provider(&llm_provider, &api_key);
-            let llm_response = match provider.complete(&working_messages, &available_tools, self.max_tokens, self.temperature).await {
-                Ok(response) => response,
-                Err(e) => {
-                    // Log the error for debugging
-                    println!("Spider: Error calling LLM provider {}: {}", llm_provider, e);
-
-                    // Check if it's an API key error
-                    if e.contains("401") || e.contains("unauthorized") || e.contains("api key") {
-                        return Err(format!("Authentication failed for {}: Please check your API key", llm_provider));
-                    }
-
-                    // Check if it's a rate limit error
-                    if e.contains("429") || e.contains("rate limit") {
-                        return Err(format!("Rate limited by {}: Please try again later", llm_provider));
-                    }
-
-                    // Return user-friendly error message
-                    return Err(format!("Failed to get response from {}: {}", llm_provider, e));
-                }
-            };
-
-            // Check if the response contains tool calls
-            if let Some(ref tool_calls_json) = llm_response.tool_calls_json {
-                // The agent wants to use tools - execute them
-                println!("Spider: Iteration {} - Agent requested tool calls", iteration_count);
-                let tool_results = self.process_tool_calls(tool_calls_json, Some(conversation_id.clone())).await?;
-
-                // Add the assistant's message with tool calls
-                working_messages.push(llm_response.clone());
-
-                // Add tool results as a new message for the LLM to see
-                working_messages.push(Message {
-                    role: "tool".to_string(),
-                    content: "Tool execution results".to_string(),
-                    tool_calls_json: None,
-                    tool_results_json: Some(serde_json::to_string(&tool_results).unwrap()),
-                    timestamp: Utc::now().timestamp() as u64,
-                });
-
-                // Continue the loop - the agent will decide what to do next
-                continue;
-            } else {
-                // No tool calls - the agent has decided to provide a final response
-                // Break the loop and return this response
-                println!("Spider: Iteration {} - Agent provided final response (no tool calls)", iteration_count);
-                break llm_response;
-            }
-        };
-
-        // Add the final response to messages
-        working_messages.push(response.clone());
-
-        let metadata = request.metadata.unwrap_or(ConversationMetadata {
-            start_time: Utc::now().to_rfc3339(),
-            client: "unknown".to_string(),
-            from_stt: false,
-        });
-
-        let conversation = Conversation {
-            id: conversation_id.clone(),
-            messages: working_messages,
-            metadata,
-            llm_provider,
-            mcp_servers: request.mcp_servers.unwrap_or_default(),
-        };
-
-        // Save to VFS
-        if let Err(e) = self.save_conversation_to_vfs(&conversation).await {
-            println!("Warning: Failed to save conversation to VFS: {}", e);
-        }
-
-        // Keep in memory for quick access
-        self.active_conversations.push((conversation_id.clone(), conversation));
-
-        Ok(ChatResponse {
-            conversation_id,
-            response,
-        })
+        // Use the shared internal chat processing logic (without WebSocket streaming)
+        self.process_chat_internal(request, None).await
     }
 
     #[local]
@@ -742,24 +840,239 @@ impl SpiderState {
         self.spider_api_keys.iter().any(|k| k.key == key)
     }
 
+    // Streaming version of chat for WebSocket clients
+    async fn process_chat_request_with_streaming(&mut self, request: ChatRequest, channel_id: u32) -> Result<ChatResponse, String> {
+        // Send initial status
+        let status_msg = serde_json::json!({
+            "type": "status",
+            "status": "processing",
+            "message": "Starting chat processing..."
+        });
+        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), status_msg.to_string()));
+
+        // Use the regular chat processing but send streaming updates
+        let result = self.process_chat_internal(request, Some(channel_id)).await;
+
+        // Send completion status
+        let status_msg = serde_json::json!({
+            "type": "status",
+            "status": "complete"
+        });
+        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), status_msg.to_string()));
+
+        result
+    }
+
+    // Internal chat processing logic shared by HTTP and WebSocket
+    async fn process_chat_internal(&mut self, request: ChatRequest, channel_id: Option<u32>) -> Result<ChatResponse, String> {
+        // This is a refactored version of the chat logic that can send WebSocket updates
+        // For now, just call the regular chat method
+        // TODO: Refactor the chat method to use this shared logic
+
+        // We can't easily call the #[http] method from here, so we'll need to duplicate the logic
+        // or restructure the code. For now, let's just process it inline.
+
+        // Validate Spider API key
+        if !self.validate_spider_key(&request.api_key) {
+            return Err("Unauthorized: Invalid Spider API key".to_string());
+        }
+
+        // Check permissions
+        let spider_key = self.spider_api_keys.iter()
+            .find(|k| k.key == request.api_key)
+            .ok_or("Unauthorized: Invalid Spider API key")?;
+
+        if !spider_key.permissions.contains(&"chat".to_string()) {
+            return Err("Forbidden: API key lacks chat permission".to_string());
+        }
+
+        let conversation_id = Uuid::new_v4().to_string();
+        let llm_provider = request.llm_provider.unwrap_or(self.default_llm_provider.clone());
+
+        println!("Spider: Starting new conversation {} with provider {} (key: {})",
+                 conversation_id, llm_provider, spider_key.name);
+
+        // Get the API key for the selected provider and decrypt it
+        let encrypted_key = self.api_keys.iter()
+            .find(|(p, _)| p == &llm_provider)
+            .map(|(_, k)| k.key.clone())
+            .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?;
+        let api_key = self.decrypt_key(&encrypted_key);
+
+        // Collect available tools from connected MCP servers
+        let available_tools: Vec<Tool> = if let Some(ref mcp_server_ids) = request.mcp_servers {
+            self.mcp_servers.iter()
+                .filter(|s| s.connected && mcp_server_ids.contains(&s.id))
+                .flat_map(|s| s.tools.clone())
+                .collect()
+        } else {
+            // Use all connected servers if none specified
+            self.mcp_servers.iter()
+                .filter(|s| s.connected)
+                .flat_map(|s| s.tools.clone())
+                .collect()
+        };
+
+        // Start the agentic loop - runs indefinitely until the agent stops making tool calls
+        let mut working_messages = request.messages.clone();
+        let mut iteration_count = 0;
+
+        let response = loop {
+            iteration_count += 1;
+
+            // Send streaming update if WebSocket channel provided
+            if let Some(ch_id) = channel_id {
+                let stream_msg = serde_json::json!({
+                    "type": "stream",
+                    "iteration": iteration_count,
+                    "message": format!("Processing iteration {}...", iteration_count)
+                });
+                send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), stream_msg.to_string()));
+            }
+
+            // Call the LLM with available tools using the provider abstraction
+            let provider = create_llm_provider(&llm_provider, &api_key);
+            let llm_response = match provider.complete(&working_messages, &available_tools, self.max_tokens, self.temperature).await {
+                Ok(response) => response,
+                Err(e) => {
+                    // Log the error for debugging
+                    println!("Spider: Error calling LLM provider {}: {}", llm_provider, e);
+
+                    // Check if it's an API key error
+                    if e.contains("401") || e.contains("unauthorized") || e.contains("api key") {
+                        return Err(format!("Authentication failed for {}: Please check your API key", llm_provider));
+                    }
+
+                    // Check if it's a rate limit error
+                    if e.contains("429") || e.contains("rate limit") {
+                        return Err(format!("Rate limited by {}: Please try again later", llm_provider));
+                    }
+
+                    // Return user-friendly error message
+                    return Err(format!("Failed to get response from {}: {}", llm_provider, e));
+                }
+            };
+
+            // Check if the response contains tool calls
+            if let Some(ref tool_calls_json) = llm_response.tool_calls_json {
+                // The agent wants to use tools - execute them
+                println!("Spider: Iteration {} - Agent requested tool calls", iteration_count);
+
+                // Send streaming update for tool calls
+                if let Some(ch_id) = channel_id {
+                    let stream_msg = serde_json::json!({
+                        "type": "stream",
+                        "iteration": iteration_count,
+                        "message": "Executing tool calls...",
+                        "tool_calls": tool_calls_json
+                    });
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), stream_msg.to_string()));
+                }
+
+                let tool_results = self.process_tool_calls(tool_calls_json, Some(conversation_id.clone())).await?;
+
+                // Add the assistant's message with tool calls
+                working_messages.push(llm_response.clone());
+                
+                // Send the assistant message with tool calls to the client
+                if let Some(ch_id) = channel_id {
+                    let msg_update = serde_json::json!({
+                        "type": "message",
+                        "message": llm_response.clone()
+                    });
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), msg_update.to_string()));
+                }
+
+                // Add tool results as a new message for the LLM to see
+                let tool_message = Message {
+                    role: "tool".to_string(),
+                    content: "Tool execution results".to_string(),
+                    tool_calls_json: None,
+                    tool_results_json: Some(serde_json::to_string(&tool_results).unwrap()),
+                    timestamp: Utc::now().timestamp() as u64,
+                };
+                working_messages.push(tool_message.clone());
+                
+                // Send the tool results message to the client
+                if let Some(ch_id) = channel_id {
+                    let msg_update = serde_json::json!({
+                        "type": "message",
+                        "message": tool_message
+                    });
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), msg_update.to_string()));
+                }
+
+                // Continue the loop - the agent will decide what to do next
+                continue;
+            } else {
+                // No tool calls - the agent has decided to provide a final response
+                // Break the loop and return this response
+                println!("Spider: Iteration {} - Agent provided final response (no tool calls)", iteration_count);
+
+                // Send the final assistant message to the client
+                if let Some(ch_id) = channel_id {
+                    let msg_update = serde_json::json!({
+                        "type": "message",
+                        "message": llm_response.clone()
+                    });
+                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), msg_update.to_string()));
+                }
+
+                break llm_response;
+            }
+        };
+
+        // Add the final response to messages
+        working_messages.push(response.clone());
+
+        let metadata = request.metadata.unwrap_or(ConversationMetadata {
+            start_time: Utc::now().to_rfc3339(),
+            client: "unknown".to_string(),
+            from_stt: false,
+        });
+
+        // Get only the new messages that were added during this chat session
+        // (everything after the initial user messages)
+        let initial_message_count = request.messages.len();
+        let new_messages = working_messages[initial_message_count..].to_vec();
+        
+        let conversation = Conversation {
+            id: conversation_id.clone(),
+            messages: working_messages,
+            metadata,
+            llm_provider,
+            mcp_servers: request.mcp_servers.unwrap_or_default(),
+        };
+
+        // Save to VFS
+        if let Err(e) = self.save_conversation_to_vfs(&conversation).await {
+            println!("Warning: Failed to save conversation to VFS: {}", e);
+        }
+
+        // Keep in memory for quick access
+        self.active_conversations.push((conversation_id.clone(), conversation));
+
+        Ok(ChatResponse {
+            conversation_id,
+            response,
+            all_messages: new_messages,
+        })
+    }
+
     async fn save_conversation_to_vfs(&self, conversation: &Conversation) -> Result<(), String> {
         let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let filename = format!("{}-{}.json", timestamp, conversation.id);
 
         // Try to create the conversations directory if it doesn't exist
         let dir_path = match create_drive(our().package_id(), "conversations", None) {
-            Ok(drive_path) => {
-                println!("Created conversations drive");
-                open_dir(&format!("{drive_path}/conversations"), true, None)
-                    .map_err(|e| format!("Failed to open conversations dir after creation: {:?}", e))?
-            }
+            Ok(drive_path) => drive_path,
             Err(e) => {
                 println!("Warning: Failed to create conversations drive: {:?}", e);
                 // Continue anyway - we'll keep conversations in memory
                 return Ok(());
             }
         };
-        let file_path = format!("{}/{}", dir_path.path, filename);
+        let file_path = format!("{dir_path}/{filename}");
 
         // Serialize the conversation
         let json_content = serde_json::to_string_pretty(conversation)
@@ -1186,7 +1499,8 @@ impl AnthropicProvider {
 
         // Create the request
         let mut request = CreateMessageRequest::new(
-            "claude-opus-4-1-20250805", // Use the latest model
+            //"claude-opus-4-1-20250805",
+            "claude-sonnet-4-20250514",
             sdk_messages,
             max_tokens,
         ).with_temperature(temperature);

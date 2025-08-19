@@ -72,6 +72,7 @@ interface SpiderStore {
   error: string | null;
   isConnected: boolean;
   nodeId: string;
+  currentRequestId: string | null;
   
   // Actions
   initialize: () => Promise<void>;
@@ -83,8 +84,12 @@ interface SpiderStore {
   loadSpiderKeys: () => Promise<void>;
   addMcpServer: (name: string, transport: any) => Promise<void>;
   connectMcpServer: (serverId: string) => Promise<void>;
+  disconnectMcpServer: (serverId: string) => Promise<void>;
+  removeMcpServer: (serverId: string) => Promise<void>;
   loadMcpServers: () => Promise<void>;
-  sendMessage: (message: string) => Promise<void>;
+  sendMessage: (message: string, signal?: AbortSignal) => Promise<void>;
+  cancelRequest: () => Promise<void>;
+  clearActiveConversation: () => void;
   loadConversations: (client?: string, limit?: number) => Promise<void>;
   loadConversation: (id: string) => Promise<void>;
   loadConfig: () => Promise<void>;
@@ -108,6 +113,7 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
   error: null,
   isConnected: false,
   nodeId: '',
+  currentRequestId: null,
 
   // Actions
   initialize: async () => {
@@ -229,6 +235,28 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
     }
   },
 
+  disconnectMcpServer: async (serverId: string) => {
+    try {
+      set({ isLoading: true, error: null });
+      await api.disconnectMcpServer(serverId);
+      await get().loadMcpServers();
+      set({ isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message || 'Failed to disconnect MCP server', isLoading: false });
+    }
+  },
+
+  removeMcpServer: async (serverId: string) => {
+    try {
+      set({ isLoading: true, error: null });
+      await api.removeMcpServer(serverId);
+      await get().loadMcpServers();
+      set({ isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message || 'Failed to remove MCP server', isLoading: false });
+    }
+  },
+
   loadMcpServers: async () => {
     try {
       const servers = await api.listMcpServers();
@@ -238,9 +266,10 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
     }
   },
 
-  sendMessage: async (message: string) => {
+  sendMessage: async (message: string, signal?: AbortSignal) => {
     try {
-      set({ isLoading: true, error: null });
+      const requestId = Math.random().toString(36).substring(7);
+      set({ isLoading: true, error: null, currentRequestId: requestId });
       
       // Get current conversation or create new one
       let conversation = get().activeConversation;
@@ -274,39 +303,65 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
       // Use the admin GUI key for chat
       const apiKey = 'sp_admin_gui_key';
       
-      // Send to backend
+      // Send to backend with abort signal support
       const response = await api.chat(
         apiKey,
         conversation.messages,
         conversation.llmProvider,
         conversation.mcpServers,
-        conversation.metadata
+        conversation.metadata,
+        signal
       );
       
-      // Update conversation with response
-      conversation.id = response.conversationId;
-      conversation.messages.push(response.response);
-      
-      // Update conversations list
-      const conversations = get().conversations;
-      const existingIndex = conversations.findIndex(c => c.id === conversation.id);
-      if (existingIndex >= 0) {
-        conversations[existingIndex] = conversation;
-      } else {
-        conversations.unshift(conversation);
+      // Only update if this request hasn't been cancelled
+      if (get().currentRequestId === requestId) {
+        // Update conversation with response
+        conversation.id = response.conversationId;
+        
+        // Add all messages from the response (includes tool calls and results)
+        if (response.allMessages && response.allMessages.length > 0) {
+          conversation.messages.push(...response.allMessages);
+        } else {
+          // Fallback to just the final response if allMessages is not available
+          conversation.messages.push(response.response);
+        }
+        
+        // Update conversations list
+        const conversations = get().conversations;
+        const existingIndex = conversations.findIndex(c => c.id === conversation.id);
+        if (existingIndex >= 0) {
+          conversations[existingIndex] = conversation;
+        } else {
+          conversations.unshift(conversation);
+        }
+        
+        set({ 
+          activeConversation: { ...conversation },
+          conversations: [...conversations],
+          isLoading: false,
+          currentRequestId: null
+        });
       }
-      
-      set({ 
-        activeConversation: { ...conversation },
-        conversations: [...conversations],
-        isLoading: false 
-      });
     } catch (error: any) {
-      set({ 
-        error: error.message || 'Failed to send message', 
-        isLoading: false 
-      });
+      if (error.name === 'AbortError') {
+        set({ isLoading: false, currentRequestId: null });
+      } else {
+        set({ 
+          error: error.message || 'Failed to send message', 
+          isLoading: false,
+          currentRequestId: null
+        });
+      }
     }
+  },
+
+  cancelRequest: async () => {
+    set({ currentRequestId: null, isLoading: false });
+    // TODO: Send cancel request to backend if needed
+  },
+
+  clearActiveConversation: () => {
+    set({ activeConversation: null });
   },
 
   loadConversations: async (client?: string, limit?: number) => {

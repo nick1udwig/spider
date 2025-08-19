@@ -61,6 +61,18 @@ export async function connectMcpServer(serverId: string) {
   return _connectMcpServer(serverId);
 }
 
+export async function disconnectMcpServer(serverId: string) {
+  // TODO: Implement when backend API is available
+  console.warn('disconnectMcpServer not yet implemented in backend');
+  return Promise.resolve('');
+}
+
+export async function removeMcpServer(serverId: string) {
+  // TODO: Implement when backend API is available
+  console.warn('removeMcpServer not yet implemented in backend');
+  return Promise.resolve('');
+}
+
 export async function listConversations(client?: string, limit?: number, offset?: number): Promise<Conversation[]> {
   return _listConversations({
     client: client || null,
@@ -85,7 +97,8 @@ export async function updateConfig(config: Partial<ConfigResponse>): Promise<str
   });
 }
 
-export async function chat(apiKey: string, messages: Message[], llmProvider?: string, mcpServers?: string[], metadata?: ConversationMetadata): Promise<ChatResponse> {
+export async function chat(apiKey: string, messages: Message[], llmProvider?: string, mcpServers?: string[], metadata?: ConversationMetadata, signal?: AbortSignal): Promise<ChatResponse> {
+  // TODO: Pass signal to the underlying API call when supported
   return _chat({
     apiKey,
     messages,

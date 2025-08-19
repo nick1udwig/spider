@@ -1715,9 +1715,10 @@ dependencies = [
 [[package]]
 name = "hyperware-anthropic-sdk"
 version = "0.1.0"
-source = "git+https://github.com/hyperware-ai/hyperware-anthropic-sdk#48da58808fcb1a0fb58f0673bef95c38ca213dd1"
+source = "git+https://github.com/hyperware-ai/hyperware-anthropic-sdk?rev=6f50ca7#6f50ca78e1926c42d2e3a388f6d9dac76ec73dd9"
 dependencies = [
  "hyperware_process_lib 2.2.0",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
