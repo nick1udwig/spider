@@ -1704,7 +1704,7 @@ dependencies = [
 [[package]]
 name = "hyperprocess_macro"
 version = "0.1.0"
-source = "git+https://github.com/hyperware-ai/hyperprocess-macro?rev=c6f0d35#c6f0d35ecbcfc43764a40937b0e55de77376a2e2"
+source = "git+https://github.com/hyperware-ai/hyperprocess-macro?rev=19a2f48#19a2f48bbf0ed02d278f08678d318215521f5933"
 dependencies = [
  "hyperware_process_lib 2.0.1",
  "proc-macro2",

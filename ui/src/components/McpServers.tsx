@@ -5,23 +5,21 @@ export default function McpServers() {
   const { mcpServers, isLoading, error, addMcpServer, connectMcpServer } = useSpiderStore();
   const [showAddForm, setShowAddForm] = useState(false);
   const [serverName, setServerName] = useState('');
-  const [transportType, setTransportType] = useState<'stdio' | 'http'>('stdio');
-  const [command, setCommand] = useState('');
-  const [args, setArgs] = useState('');
-  const [url, setUrl] = useState('');
+  const [url, setUrl] = useState('ws://localhost:10125');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    const transport = transportType === 'stdio' 
-      ? { Stdio: { command, args: args.split(' ').filter(a => a) } }
-      : { Http: { url } };
+    const transport = {
+      transportType: 'websocket',
+      command: null,
+      args: null,
+      url: url
+    };
     
     await addMcpServer(serverName, transport);
     setServerName('');
-    setCommand('');
-    setArgs('');
-    setUrl('');
+    setUrl('ws://localhost:10125');
     setShowAddForm(false);
   };
 
@@ -59,54 +57,23 @@ export default function McpServers() {
           
           <div className="form-group">
             <label htmlFor="transport-type">Transport Type</label>
-            <select
-              id="transport-type"
-              value={transportType}
-              onChange={(e) => setTransportType(e.target.value as 'stdio' | 'http')}
-            >
-              <option value="stdio">Stdio</option>
-              <option value="http">HTTP</option>
-            </select>
+            <div className="transport-info">WebSocket</div>
           </div>
           
-          {transportType === 'stdio' ? (
-            <>
-              <div className="form-group">
-                <label htmlFor="command">Command</label>
-                <input
-                  id="command"
-                  type="text"
-                  value={command}
-                  onChange={(e) => setCommand(e.target.value)}
-                  placeholder="/path/to/mcp-server"
-                  required
-                />
-              </div>
-              
-              <div className="form-group">
-                <label htmlFor="args">Arguments (space-separated)</label>
-                <input
-                  id="args"
-                  type="text"
-                  value={args}
-                  onChange={(e) => setArgs(e.target.value)}
-                  placeholder="--arg1 value1 --arg2 value2"
-                />
-              </div>
-            </>
-          ) : (
-            <div className="form-group">
-              <label htmlFor="url">URL</label>
-              <input
-                id="url"
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://mcp-server.example.com"
-                required
-              />
-            </div>
-          )}
+          <div className="form-group">
+            <label htmlFor="url">WebSocket URL</label>
+            <input
+              id="url"
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="ws://localhost:10125"
+              required
+            />
+            <small className="form-help">
+              URL of the WebSocket MCP server or ws-mcp wrapper
+            </small>
+          </div>
           
           <button type="submit" className="btn btn-primary" disabled={isLoading}>
             {isLoading ? 'Adding...' : 'Add Server'}
@@ -124,9 +91,7 @@ export default function McpServers() {
                 <h3>{server.name}</h3>
                 <p>Status: {server.connected ? '🟢 Connected' : '🔴 Disconnected'}</p>
                 <p>
-                  Transport: {server.transport.Stdio 
-                    ? `Stdio: ${server.transport.Stdio.command}` 
-                    : `HTTP: ${server.transport.Http?.url}`}
+                  Transport: WebSocket - {server.transport.url || 'No URL specified'}
                 </p>
                 <p>Tools: {server.tools.length}</p>
               </div>

@@ -27,7 +27,7 @@ git = "https://github.com/hyperware-ai/hyperware-anthropic-sdk"
 
 [dependencies.hyperprocess_macro]
 git = "https://github.com/hyperware-ai/hyperprocess-macro"
-rev = "c6f0d35"
+rev = "19a2f48"
 
 [dependencies.caller-utils]
 path = "../target/caller-utils"

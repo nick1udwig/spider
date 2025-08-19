@@ -1,8 +1,14 @@
 use hyperprocess_macro::*;
 use hyperware_process_lib::{
     our,
+    println,
     homepage::add_to_homepage,
     vfs::{open_dir, open_file, create_drive},
+    LazyLoadBlob,
+    http::{
+        client::{open_ws_connection, send_ws_client_push},
+        server::WsMessageType,
+    },
 };
 use hyperware_anthropic_sdk::{
     AnthropicClient, CreateMessageRequest, Message as SdkMessage,
@@ -15,6 +21,7 @@ use uuid::Uuid;
 use chrono::Utc;
 use std::pin::Pin;
 use std::future::Future;
+use std::collections::HashMap;
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct SpiderState {
@@ -25,6 +32,36 @@ pub struct SpiderState {
     default_llm_provider: String,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip)]
+    ws_connections: HashMap<u32, WsConnection>,  // channel_id -> connection info
+    #[serde(skip)]
+    pending_mcp_requests: HashMap<String, PendingMcpRequest>, // request_id -> pending request
+    #[serde(skip)]
+    next_channel_id: u32,
+}
+
+#[derive(Clone, Debug)]
+struct WsConnection {
+    server_id: String,
+    server_name: String,
+    channel_id: u32,
+    tools: Vec<Tool>,
+    initialized: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingMcpRequest {
+    request_id: String,
+    conversation_id: Option<String>,
+    server_id: String,
+    request_type: McpRequestType,
+}
+
+#[derive(Clone, Debug)]
+enum McpRequestType {
+    Initialize,
+    ToolsList,
+    ToolCall { tool_name: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -218,6 +255,7 @@ impl SpiderState {
         self.default_llm_provider = "anthropic".to_string();
         self.max_tokens = 4096;
         self.temperature = 0.7;
+        self.next_channel_id = 1000; // Start channel IDs at 1000
 
         let our_node = our().node.clone();
         println!("Spider MCP client initialized on node: {}", our_node);
@@ -237,6 +275,50 @@ impl SpiderState {
         }
 
         // VFS directory creation will be handled when actually saving files
+    }
+
+    #[ws_client]
+    fn handle_ws_client(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
+        match message_type {
+            WsMessageType::Text | WsMessageType::Binary => {
+                println!("Got WS Text");
+                // Handle incoming message from the WebSocket server
+                let message_bytes = blob.bytes;
+
+                // Parse the message as JSON
+                let message_str = String::from_utf8(message_bytes).unwrap_or_default();
+                if let Ok(json_msg) = serde_json::from_str::<Value>(&message_str) {
+                    self.handle_mcp_message(channel_id, json_msg);
+                } else {
+                    println!("Spider: Failed to parse MCP message from channel {}: {}", channel_id, message_str);
+                }
+            },
+            WsMessageType::Close => {
+                // Handle connection close
+                println!("Spider: WebSocket connection closed for channel {}", channel_id);
+
+                // Find and disconnect the server
+                if let Some(conn) = self.ws_connections.remove(&channel_id) {
+                    // Mark server as disconnected
+                    if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == conn.server_id) {
+                        server.connected = false;
+                        println!("Spider: MCP server {} disconnected", server.name);
+                    }
+                }
+
+                // Clean up any pending requests for this connection
+                self.pending_mcp_requests.retain(|_, req| {
+                    if let Some(conn) = self.ws_connections.get(&channel_id) {
+                        req.server_id != conn.server_id
+                    } else {
+                        true
+                    }
+                });
+            },
+            WsMessageType::Ping | WsMessageType::Pong => {
+                // Ignore ping/pong messages for now
+            }
+        }
     }
 
     #[http]
@@ -346,17 +428,78 @@ impl SpiderState {
             (server.name.clone(), server.transport.clone())
         };
 
-        // Discover tools from the MCP server
-        let tools = self.discover_mcp_tools(&transport).await?;
-        let tool_count = tools.len();
+        // For WebSocket-wrapped stdio servers, connect via WebSocket
+        if transport.transport_type == "websocket" || transport.transport_type == "stdio" {
+            // Get WebSocket URL (ws-mcp wrapper should be running)
+            let ws_url = transport.url.clone()
+                .unwrap_or_else(|| "ws://localhost:10125".to_string());
 
-        // Update the server with discovered tools
-        if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == server_id) {
-            server.tools = tools;
-            server.connected = true;
+            // Allocate a channel ID for this connection
+            let channel_id = self.next_channel_id;
+            self.next_channel_id += 1;
+
+            // Open WebSocket connection
+            open_ws_connection(ws_url.clone(), None, channel_id).await
+                .map_err(|e| format!("Failed to connect to MCP server: {:?}", e))?;
+
+            // Store connection info
+            self.ws_connections.insert(channel_id, WsConnection {
+                server_id: server_id.clone(),
+                server_name: server_name.clone(),
+                channel_id,
+                tools: Vec::new(),
+                initialized: false,
+            });
+
+            // Send initialize request
+            let init_request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "clientInfo": {
+                        "name": "spider",
+                        "version": "1.0.0"
+                    },
+                    "capabilities": {}
+                },
+                "id": format!("init_{}", channel_id)
+            });
+
+            // Store pending request
+            self.pending_mcp_requests.insert(
+                format!("init_{}", channel_id),
+                PendingMcpRequest {
+                    request_id: format!("init_{}", channel_id),
+                    conversation_id: None,
+                    server_id: server_id.clone(),
+                    request_type: McpRequestType::Initialize,
+                }
+            );
+
+            // Send the initialize message
+            let blob = LazyLoadBlob::new(Some("application/json"), init_request.to_string().into_bytes());
+            send_ws_client_push(channel_id, WsMessageType::Text, blob);
+
+            // Mark server as connecting (will be marked connected when initialized)
+            if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == server_id) {
+                server.connected = false; // Will be set to true when initialization completes
+            }
+
+            Ok(format!("Connecting to MCP server {} via WebSocket...", server_name))
+        } else {
+            // For other transport types, use the old method for now
+            let tools = self.discover_mcp_tools(&transport).await?;
+            let tool_count = tools.len();
+
+            // Update the server with discovered tools
+            if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == server_id) {
+                server.tools = tools;
+                server.connected = true;
+            }
+
+            Ok(format!("Connected to MCP server {} with {} tools", server_name, tool_count))
         }
-
-        Ok(format!("Connected to MCP server {} with {} tools", server_name, tool_count))
     }
 
     #[http]
@@ -489,7 +632,7 @@ impl SpiderState {
             if let Some(ref tool_calls_json) = llm_response.tool_calls_json {
                 // The agent wants to use tools - execute them
                 println!("Spider: Iteration {} - Agent requested tool calls", iteration_count);
-                let tool_results = self.process_tool_calls(tool_calls_json).await?;
+                let tool_results = self.process_tool_calls(tool_calls_json, Some(conversation_id.clone())).await?;
 
                 // Add the assistant's message with tool calls
                 working_messages.push(llm_response.clone());
@@ -602,28 +745,21 @@ impl SpiderState {
     async fn save_conversation_to_vfs(&self, conversation: &Conversation) -> Result<(), String> {
         let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let filename = format!("{}-{}.json", timestamp, conversation.id);
-        let dir_path = format!("{}/conversations", our().node);
-        let file_path = format!("{}/{}", dir_path, filename);
 
         // Try to create the conversations directory if it doesn't exist
-        let _dir = match open_dir(&dir_path, true, None) {
-            Ok(dir) => dir,
-            Err(_) => {
-                // Try to create the drive first
-                match create_drive(our().package_id(), "conversations", None) {
-                    Ok(_) => {
-                        println!("Created conversations drive");
-                        open_dir(&dir_path, true, None)
-                            .map_err(|e| format!("Failed to open conversations dir after creation: {:?}", e))?
-                    }
-                    Err(e) => {
-                        println!("Warning: Failed to create conversations drive: {:?}", e);
-                        // Continue anyway - we'll keep conversations in memory
-                        return Ok(());
-                    }
-                }
+        let dir_path = match create_drive(our().package_id(), "conversations", None) {
+            Ok(drive_path) => {
+                println!("Created conversations drive");
+                open_dir(&format!("{drive_path}/conversations"), true, None)
+                    .map_err(|e| format!("Failed to open conversations dir after creation: {:?}", e))?
+            }
+            Err(e) => {
+                println!("Warning: Failed to create conversations drive: {:?}", e);
+                // Continue anyway - we'll keep conversations in memory
+                return Ok(());
             }
         };
+        let file_path = format!("{}/{}", dir_path.path, filename);
 
         // Serialize the conversation
         let json_content = serde_json::to_string_pretty(conversation)
@@ -676,6 +812,145 @@ impl SpiderState {
         Err(format!("Conversation {} not found in VFS", conversation_id))
     }
 
+    fn handle_mcp_message(&mut self, channel_id: u32, message: Value) {
+        // Find the connection for this channel
+        let conn = match self.ws_connections.get(&channel_id) {
+            Some(c) => c.clone(),
+            None => {
+                println!("Spider: Received MCP message for unknown channel {}", channel_id);
+                return;
+            }
+        };
+
+        // Check if this is a response to a pending request
+        if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
+            if let Some(pending) = self.pending_mcp_requests.remove(id) {
+                match pending.request_type {
+                    McpRequestType::Initialize => {
+                        self.handle_initialize_response(channel_id, &conn, &message);
+                    }
+                    McpRequestType::ToolsList => {
+                        self.handle_tools_list_response(channel_id, &conn, &message);
+                    }
+                    McpRequestType::ToolCall { tool_name: _ } => {
+                        self.handle_tool_call_response(&pending, &message);
+                    }
+                }
+            }
+        }
+
+        // Handle notifications or other messages
+        if let Some(method) = message.get("method").and_then(|v| v.as_str()) {
+            match method {
+                "tools/list_changed" => {
+                    // Tools have changed, re-fetch them
+                    self.request_tools_list(channel_id);
+                }
+                _ => {
+                    println!("Spider: Received MCP notification: {}", method);
+                }
+            }
+        }
+    }
+
+    fn handle_initialize_response(&mut self, channel_id: u32, conn: &WsConnection, message: &Value) {
+        if let Some(result) = message.get("result") {
+            println!("Spider: MCP server {} initialized successfully", conn.server_name);
+
+            // Mark connection as initialized
+            if let Some(ws_conn) = self.ws_connections.get_mut(&channel_id) {
+                ws_conn.initialized = true;
+            }
+
+            // Send notifications/initialized
+            let notif = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            });
+            let blob = LazyLoadBlob::new(Some("application/json"), notif.to_string().into_bytes());
+            send_ws_client_push(channel_id, WsMessageType::Text, blob);
+
+            // Request tools list
+            self.request_tools_list(channel_id);
+        } else if let Some(error) = message.get("error") {
+            println!("Spider: Failed to initialize MCP server {}: {:?}", conn.server_name, error);
+        }
+    }
+
+    fn request_tools_list(&mut self, channel_id: u32) {
+        let request_id = format!("tools_{}", channel_id);
+        let tools_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": request_id.clone()
+        });
+
+        // Store pending request
+        if let Some(conn) = self.ws_connections.get(&channel_id) {
+            self.pending_mcp_requests.insert(
+                request_id.clone(),
+                PendingMcpRequest {
+                    request_id,
+                    conversation_id: None,
+                    server_id: conn.server_id.clone(),
+                    request_type: McpRequestType::ToolsList,
+                }
+            );
+        }
+
+        let blob = LazyLoadBlob::new(Some("application/json"), tools_request.to_string().into_bytes());
+        send_ws_client_push(channel_id, WsMessageType::Text, blob);
+    }
+
+    fn handle_tools_list_response(&mut self, channel_id: u32, conn: &WsConnection, message: &Value) {
+        if let Some(result) = message.get("result") {
+            if let Some(tools_json) = result.get("tools").and_then(|v| v.as_array()) {
+                let mut tools = Vec::new();
+
+                for tool_json in tools_json {
+                    if let (Some(name), Some(description)) = (
+                        tool_json.get("name").and_then(|v| v.as_str()),
+                        tool_json.get("description").and_then(|v| v.as_str())
+                    ) {
+                        let parameters = tool_json.get("parameters")
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "{}".to_string());
+
+                        tools.push(Tool {
+                            name: name.to_string(),
+                            description: description.to_string(),
+                            parameters,
+                        });
+                    }
+                }
+
+                let tool_count = tools.len();
+                println!("Spider: Received {} tools from MCP server {}", tool_count, conn.server_name);
+
+                // Update connection with tools
+                if let Some(ws_conn) = self.ws_connections.get_mut(&channel_id) {
+                    ws_conn.tools = tools.clone();
+                }
+
+                // Update server with tools and mark as connected
+                if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == conn.server_id) {
+                    server.tools = tools;
+                    server.connected = true;
+                }
+            }
+        } else if let Some(error) = message.get("error") {
+            println!("Spider: Failed to get tools from MCP server {}: {:?}", conn.server_name, error);
+        }
+    }
+
+    fn handle_tool_call_response(&mut self, pending: &PendingMcpRequest, message: &Value) {
+        // TODO: Route tool call results back to the appropriate conversation
+        println!("Spider: Received tool call response for conversation {:?}: {:?}",
+                 pending.conversation_id, message);
+
+        // This will be implemented when we handle tool calls in chat
+    }
+
     async fn discover_mcp_tools(&self, transport: &TransportConfig) -> Result<Vec<Tool>, String> {
         // MCP tool discovery implementation
         match transport.transport_type.as_str() {
@@ -714,7 +989,7 @@ impl SpiderState {
         }
     }
 
-    async fn execute_mcp_tool(&self, server_id: &str, tool_name: &str, parameters: &Value) -> Result<Value, String> {
+    async fn execute_mcp_tool(&mut self, server_id: &str, tool_name: &str, parameters: &Value, conversation_id: Option<String>) -> Result<Value, String> {
         let server = self.mcp_servers.iter()
             .find(|s| s.id == server_id && s.connected)
             .ok_or_else(|| format!("MCP server {} not found or not connected", server_id))?;
@@ -724,50 +999,51 @@ impl SpiderState {
             .find(|t| t.name == tool_name)
             .ok_or_else(|| format!("Tool {} not found on server {}", tool_name, server_id))?;
 
+        // Find the WebSocket connection for this server
+        let channel_id = self.ws_connections.iter()
+            .find(|(_, conn)| conn.server_id == server_id)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| format!("No WebSocket connection found for server {}", server_id))?;
+
         // Execute the tool based on transport type
         match server.transport.transport_type.as_str() {
-            "stdio" => {
-                // In WASM environment, we can't spawn processes
-                // Simulate tool execution for demonstration
-                // In production, this would use a proxy service or HTTP transport
-                println!("Note: Simulating tool execution for {} in WASM environment", tool_name);
+            "stdio" | "websocket" => {
+                // Execute via WebSocket
+                let request_id = format!("tool_{}_{}", channel_id, Uuid::new_v4());
+                let tool_request = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": parameters
+                    },
+                    "id": request_id.clone()
+                });
 
-                // Simulate different responses based on tool name
-                match tool_name {
-                    "search" => {
-                        if let Some(query) = parameters.get("query").and_then(|q| q.as_str()) {
-                            Ok(serde_json::json!({
-                                "result": format!("Search results for '{}': Found 3 relevant documents", query),
-                                "documents": [
-                                    {"title": "Document 1", "snippet": "Relevant content..."},
-                                    {"title": "Document 2", "snippet": "More relevant content..."},
-                                    {"title": "Document 3", "snippet": "Additional information..."}
-                                ],
-                                "success": true
-                            }))
-                        } else {
-                            Err("Missing 'query' parameter for search tool".to_string())
-                        }
+                // Store pending request
+                self.pending_mcp_requests.insert(
+                    request_id.clone(),
+                    PendingMcpRequest {
+                        request_id: request_id.clone(),
+                        conversation_id,
+                        server_id: server_id.to_string(),
+                        request_type: McpRequestType::ToolCall { tool_name: tool_name.to_string() },
                     }
-                    "calculate" => {
-                        if let Some(expr) = parameters.get("expression").and_then(|e| e.as_str()) {
-                            // Simple calculator simulation
-                            Ok(serde_json::json!({
-                                "result": format!("Calculation result for '{}': 42", expr),
-                                "value": 42,
-                                "success": true
-                            }))
-                        } else {
-                            Err("Missing 'expression' parameter for calculate tool".to_string())
-                        }
-                    }
-                    _ => {
-                        Ok(serde_json::json!({
-                            "result": format!("Executed {} with params: {}", tool_name, parameters),
-                            "success": true
-                        }))
-                    }
-                }
+                );
+
+                // Send the tool call
+                let blob = LazyLoadBlob::new(Some("application/json"), tool_request.to_string().into_bytes());
+                send_ws_client_push(channel_id, WsMessageType::Text, blob);
+
+                // For now, return a placeholder response
+                // In a production system, we would wait for the response asynchronously
+                // and route it back to the appropriate conversation
+                Ok(serde_json::json!({
+                    "status": "executing",
+                    "request_id": request_id,
+                    "tool": tool_name,
+                    "server": server_id
+                }))
             }
             "http" => {
                 // Execute via HTTP
@@ -781,22 +1057,23 @@ impl SpiderState {
         }
     }
 
-    async fn process_tool_calls(&mut self, tool_calls_json: &str) -> Result<Vec<ToolResult>, String> {
+    async fn process_tool_calls(&mut self, tool_calls_json: &str, conversation_id: Option<String>) -> Result<Vec<ToolResult>, String> {
         let tool_calls: Vec<ToolCall> = serde_json::from_str(tool_calls_json)
             .map_err(|e| format!("Failed to parse tool calls: {}", e))?;
 
         let mut results = Vec::new();
 
         for tool_call in tool_calls {
-            // Find which MCP server has this tool
-            let server = self.mcp_servers.iter()
-                .find(|s| s.connected && s.tools.iter().any(|t| t.name == tool_call.tool_name));
+            // Find which MCP server has this tool and get its ID
+            let server_id = self.mcp_servers.iter()
+                .find(|s| s.connected && s.tools.iter().any(|t| t.name == tool_call.tool_name))
+                .map(|s| s.id.clone());
 
-            let result = if let Some(server) = server {
+            let result = if let Some(server_id) = server_id {
                 let params: Value = serde_json::from_str(&tool_call.parameters)
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
-                match self.execute_mcp_tool(&server.id, &tool_call.tool_name, &params).await {
+                match self.execute_mcp_tool(&server_id, &tool_call.tool_name, &params, conversation_id.clone()).await {
                     Ok(res) => res.to_string(),
                     Err(e) => format!(r#"{{"error":"{}"}}"#, e)
                 }
@@ -873,7 +1150,7 @@ impl AnthropicProvider {
                     result_text.push_str(&format!("- Tool call {}: {}\n", result.tool_call_id, result.result));
                 }
                 Content::Text(result_text)
-            } else if let Some(tool_calls_json) = &msg.tool_calls_json {
+            } else if let Some(_tool_calls_json) = &msg.tool_calls_json {
                 // For now, include tool calls as text in the message
                 // The SDK will handle tool use blocks separately
                 Content::Text(format!("{}\n[Tool calls pending]", msg.content))
