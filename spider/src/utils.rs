@@ -1,4 +1,7 @@
-use hyperware_process_lib::{our, vfs::{open_dir, open_file, create_drive}};
+use hyperware_process_lib::{
+    our,
+    vfs::{create_drive, open_dir, open_file},
+};
 
 use crate::types::{Conversation, Tool, TransportConfig};
 
@@ -59,7 +62,10 @@ pub(crate) async fn save_conversation_to_vfs(conversation: &Conversation) -> Res
         Ok(file) => {
             file.write(json_content.as_bytes())
                 .map_err(|e| format!("Failed to write conversation: {:?}", e))?;
-            println!("Conversation {} saved to VFS at {}", conversation.id, file_path);
+            println!(
+                "Conversation {} saved to VFS at {}",
+                conversation.id, file_path
+            );
         }
         Err(e) => {
             println!("Warning: Failed to save conversation to VFS: {:?}", e);
@@ -70,7 +76,9 @@ pub(crate) async fn save_conversation_to_vfs(conversation: &Conversation) -> Res
     Ok(())
 }
 
-pub(crate)async fn load_conversation_from_vfs(conversation_id: &str) -> Result<Conversation, String> {
+pub(crate) async fn load_conversation_from_vfs(
+    conversation_id: &str,
+) -> Result<Conversation, String> {
     let dir_path = format!("{}/conversations", our().node);
 
     // Open the conversations directory
@@ -78,7 +86,8 @@ pub(crate)async fn load_conversation_from_vfs(conversation_id: &str) -> Result<C
         .map_err(|e| format!("Failed to open conversations directory: {:?}", e))?;
 
     // List all files in the directory
-    let entries = dir.read()
+    let entries = dir
+        .read()
         .map_err(|e| format!("Failed to read directory: {:?}", e))?;
 
     // Look for a file containing the conversation ID
@@ -88,7 +97,8 @@ pub(crate)async fn load_conversation_from_vfs(conversation_id: &str) -> Result<C
             let file = open_file(&file_path, false, None)
                 .map_err(|e| format!("Failed to open conversation file: {:?}", e))?;
 
-            let content = file.read()
+            let content = file
+                .read()
                 .map_err(|e| format!("Failed to read conversation file: {:?}", e))?;
 
             let conversation: Conversation = serde_json::from_slice(&content)
@@ -129,15 +139,17 @@ pub(crate) async fn discover_mcp_tools(transport: &TransportConfig) -> Result<Ve
         "http" => {
             // For HTTP transport, we would make HTTP requests to discover tools
             // This is a placeholder implementation
-            Ok(vec![
-                Tool {
-                    name: "http_tool".to_string(),
-                    description: "An HTTP-based MCP tool".to_string(),
-                    parameters: r#"{"type":"object","properties":{"query":{"type":"string"}}}"#.to_string(),
-                    input_schema_json: None,
-                }
-            ])
+            Ok(vec![Tool {
+                name: "http_tool".to_string(),
+                description: "An HTTP-based MCP tool".to_string(),
+                parameters: r#"{"type":"object","properties":{"query":{"type":"string"}}}"#
+                    .to_string(),
+                input_schema_json: None,
+            }])
         }
-        _ => Err(format!("Unsupported transport type: {}", transport.transport_type))
+        _ => Err(format!(
+            "Unsupported transport type: {}",
+            transport.transport_type
+        )),
     }
 }

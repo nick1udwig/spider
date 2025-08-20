@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -7,14 +7,12 @@ use uuid::Uuid;
 
 use hyperprocess_macro::*;
 use hyperware_process_lib::{
-    our,
-    println,
     homepage::add_to_homepage,
-    LazyLoadBlob,
     http::{
         client::{open_ws_connection, send_ws_client_push},
-        server::{WsMessageType, send_ws_push},
+        server::{send_ws_push, WsMessageType},
     },
+    our, println, LazyLoadBlob,
 };
 
 mod provider;
@@ -24,7 +22,10 @@ mod types;
 use types::*;
 
 mod utils;
-use utils::{encrypt_key, decrypt_key, preview_key, save_conversation_to_vfs, load_conversation_from_vfs, discover_mcp_tools};
+use utils::{
+    decrypt_key, discover_mcp_tools, encrypt_key, load_conversation_from_vfs, preview_key,
+    save_conversation_to_vfs,
+};
 
 #[hyperprocess(
     name = "Spider",
@@ -59,7 +60,12 @@ impl SpiderState {
         let admin_key = SpiderApiKey {
             key: "sp_admin_gui_key".to_string(),
             name: "Admin GUI Key".to_string(),
-            permissions: vec!["chat".to_string(), "read".to_string(), "write".to_string(), "admin".to_string()],
+            permissions: vec![
+                "chat".to_string(),
+                "read".to_string(),
+                "write".to_string(),
+                "admin".to_string(),
+            ],
             created_at: Utc::now().timestamp() as u64,
         };
 
@@ -73,10 +79,8 @@ impl SpiderState {
 
         // Auto-reconnect to MCP servers that exist in state with retry logic
         // Note: Don't filter by server.connected since they won't be connected on startup
-        let servers_to_reconnect: Vec<String> = self.mcp_servers
-            .iter()
-            .map(|s| s.id.clone())
-            .collect();
+        let servers_to_reconnect: Vec<String> =
+            self.mcp_servers.iter().map(|s| s.id.clone()).collect();
 
         for server_id in servers_to_reconnect {
             println!("Auto-reconnecting to MCP server: {}", server_id);
@@ -94,8 +98,10 @@ impl SpiderState {
                         break;
                     }
                     Err(e) => {
-                        println!("Failed to auto-reconnect to MCP server {} (attempt {}/{}): {}",
-                                 server_id, attempt, max_retries, e);
+                        println!(
+                            "Failed to auto-reconnect to MCP server {} (attempt {}/{}): {}",
+                            server_id, attempt, max_retries, e
+                        );
 
                         if attempt < max_retries {
                             println!("Retrying in {} ms...", retry_delay_ms);
@@ -109,13 +115,21 @@ impl SpiderState {
             }
 
             if !success {
-                println!("Failed to reconnect to MCP server {} after {} attempts", server_id, max_retries);
+                println!(
+                    "Failed to reconnect to MCP server {} after {} attempts",
+                    server_id, max_retries
+                );
             }
         }
     }
 
     #[ws]
-    async fn handle_websocket(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
+    async fn handle_websocket(
+        &mut self,
+        channel_id: u32,
+        message_type: WsMessageType,
+        blob: LazyLoadBlob,
+    ) {
         println!("handle_websocket {channel_id}");
 
         match message_type {
@@ -130,27 +144,42 @@ impl SpiderState {
                         match msg {
                             WsClientMessage::Auth { api_key } => {
                                 if self.validate_spider_key(&api_key) {
-                                    self.chat_clients.insert(channel_id, ChatClient {
+                                    self.chat_clients.insert(
                                         channel_id,
-                                        api_key: api_key.clone(),
-                                        conversation_id: None,
-                                        connected_at: Utc::now().timestamp() as u64,
-                                    });
+                                        ChatClient {
+                                            channel_id,
+                                            api_key: api_key.clone(),
+                                            conversation_id: None,
+                                            connected_at: Utc::now().timestamp() as u64,
+                                        },
+                                    );
 
                                     // Send auth success response
                                     let response = WsServerMessage::AuthSuccess {
                                         message: "Authenticated successfully".to_string(),
                                     };
                                     let json = serde_json::to_string(&response).unwrap();
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                    send_ws_push(
+                                        channel_id,
+                                        WsMessageType::Text,
+                                        LazyLoadBlob::new(Some("application/json"), json),
+                                    );
                                 } else {
                                     // Send auth failure and close connection
                                     let response = WsServerMessage::AuthError {
                                         error: "Invalid API key".to_string(),
                                     };
                                     let json = serde_json::to_string(&response).unwrap();
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
-                                    send_ws_push(channel_id, WsMessageType::Close, LazyLoadBlob::default());
+                                    send_ws_push(
+                                        channel_id,
+                                        WsMessageType::Text,
+                                        LazyLoadBlob::new(Some("application/json"), json),
+                                    );
+                                    send_ws_push(
+                                        channel_id,
+                                        WsMessageType::Close,
+                                        LazyLoadBlob::default(),
+                                    );
                                 }
                             }
                             WsClientMessage::Chat { payload } => {
@@ -165,35 +194,60 @@ impl SpiderState {
                                     };
 
                                     // Process the chat request asynchronously
-                                    match self.process_chat_request_with_streaming(chat_request, channel_id).await {
+                                    match self
+                                        .process_chat_request_with_streaming(
+                                            chat_request,
+                                            channel_id,
+                                        )
+                                        .await
+                                    {
                                         Ok(response) => {
                                             // Send final response
-                                            let ws_response = WsServerMessage::ChatComplete {
-                                                payload: response,
-                                            };
+                                            let ws_response =
+                                                WsServerMessage::ChatComplete { payload: response };
                                             let json = serde_json::to_string(&ws_response).unwrap();
-                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                            send_ws_push(
+                                                channel_id,
+                                                WsMessageType::Text,
+                                                LazyLoadBlob::new(Some("application/json"), json),
+                                            );
                                         }
                                         Err(e) => {
-                                            let error_response = WsServerMessage::Error { error: e };
-                                            let json = serde_json::to_string(&error_response).unwrap();
-                                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                            let error_response =
+                                                WsServerMessage::Error { error: e };
+                                            let json =
+                                                serde_json::to_string(&error_response).unwrap();
+                                            send_ws_push(
+                                                channel_id,
+                                                WsMessageType::Text,
+                                                LazyLoadBlob::new(Some("application/json"), json),
+                                            );
                                         }
                                     }
                                 } else {
                                     // Not authenticated
                                     let response = WsServerMessage::Error {
-                                        error: "Not authenticated. Please send auth message first.".to_string(),
+                                        error: "Not authenticated. Please send auth message first."
+                                            .to_string(),
                                     };
                                     let json = serde_json::to_string(&response).unwrap();
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                    send_ws_push(
+                                        channel_id,
+                                        WsMessageType::Text,
+                                        LazyLoadBlob::new(Some("application/json"), json),
+                                    );
                                 }
                             }
                             WsClientMessage::Cancel => {
                                 // Cancel any active chat request for this channel
-                                if let Some(cancel_flag) = self.active_chat_cancellation.get(&channel_id) {
+                                if let Some(cancel_flag) =
+                                    self.active_chat_cancellation.get(&channel_id)
+                                {
                                     cancel_flag.store(true, Ordering::Relaxed);
-                                    println!("Spider: Cancelling chat request for channel {}", channel_id);
+                                    println!(
+                                        "Spider: Cancelling chat request for channel {}",
+                                        channel_id
+                                    );
 
                                     // Send cancellation confirmation
                                     let response = WsServerMessage::Status {
@@ -201,24 +255,39 @@ impl SpiderState {
                                         message: Some("Request cancelled".to_string()),
                                     };
                                     let json = serde_json::to_string(&response).unwrap();
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                    send_ws_push(
+                                        channel_id,
+                                        WsMessageType::Text,
+                                        LazyLoadBlob::new(Some("application/json"), json),
+                                    );
                                 }
                             }
                             WsClientMessage::Ping => {
                                 // Respond to ping with pong
                                 let response = WsServerMessage::Pong;
                                 let json = serde_json::to_string(&response).unwrap();
-                                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                                send_ws_push(
+                                    channel_id,
+                                    WsMessageType::Text,
+                                    LazyLoadBlob::new(Some("application/json"), json),
+                                );
                             }
                         }
                     }
                     Err(e) => {
-                        println!("Spider: Failed to parse WebSocket message from channel {}: {}", channel_id, e);
+                        println!(
+                            "Spider: Failed to parse WebSocket message from channel {}: {}",
+                            channel_id, e
+                        );
                         let error_response = WsServerMessage::Error {
                             error: format!("Invalid message format: {}", e),
                         };
                         let json = serde_json::to_string(&error_response).unwrap();
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                        send_ws_push(
+                            channel_id,
+                            WsMessageType::Text,
+                            LazyLoadBlob::new(Some("application/json"), json),
+                        );
                     }
                 }
             }
@@ -234,7 +303,12 @@ impl SpiderState {
     }
 
     #[ws_client]
-    fn handle_ws_client(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
+    fn handle_ws_client(
+        &mut self,
+        channel_id: u32,
+        message_type: WsMessageType,
+        blob: LazyLoadBlob,
+    ) {
         match message_type {
             WsMessageType::Text | WsMessageType::Binary => {
                 println!("Got WS Text");
@@ -246,17 +320,25 @@ impl SpiderState {
                 if let Ok(json_msg) = serde_json::from_str::<Value>(&message_str) {
                     self.handle_mcp_message(channel_id, json_msg);
                 } else {
-                    println!("Spider: Failed to parse MCP message from channel {}: {}", channel_id, message_str);
+                    println!(
+                        "Spider: Failed to parse MCP message from channel {}: {}",
+                        channel_id, message_str
+                    );
                 }
-            },
+            }
             WsMessageType::Close => {
                 // Handle connection close
-                println!("Spider: WebSocket connection closed for channel {}", channel_id);
+                println!(
+                    "Spider: WebSocket connection closed for channel {}",
+                    channel_id
+                );
 
                 // Find and disconnect the server
                 if let Some(conn) = self.ws_connections.remove(&channel_id) {
                     // Mark server as disconnected
-                    if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == conn.server_id) {
+                    if let Some(server) =
+                        self.mcp_servers.iter_mut().find(|s| s.id == conn.server_id)
+                    {
                         server.connected = false;
                         println!("Spider: MCP server {} disconnected", server.name);
                     }
@@ -270,7 +352,7 @@ impl SpiderState {
                         true
                     }
                 });
-            },
+            }
             WsMessageType::Ping | WsMessageType::Pong => {
                 // Ignore ping/pong messages for now
             }
@@ -296,14 +378,16 @@ impl SpiderState {
 
     #[http]
     async fn list_api_keys(&self) -> Result<Vec<ApiKeyInfo>, String> {
-        let keys: Vec<ApiKeyInfo> = self.api_keys.iter().map(|(provider, key)| {
-            ApiKeyInfo {
+        let keys: Vec<ApiKeyInfo> = self
+            .api_keys
+            .iter()
+            .map(|(provider, key)| ApiKeyInfo {
                 provider: provider.clone(),
                 created_at: key.created_at,
                 last_used: key.last_used,
                 key_preview: preview_key(&key.key),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(keys)
     }
@@ -321,7 +405,10 @@ impl SpiderState {
     }
 
     #[http]
-    async fn create_spider_key(&mut self, request: CreateSpiderKeyRequest) -> Result<SpiderApiKey, String> {
+    async fn create_spider_key(
+        &mut self,
+        request: CreateSpiderKeyRequest,
+    ) -> Result<SpiderApiKey, String> {
         let key = format!("sp_{}", Uuid::new_v4().to_string().replace("-", ""));
 
         let spider_key = SpiderApiKey {
@@ -378,7 +465,9 @@ impl SpiderState {
     async fn disconnect_mcp_server(&mut self, server_id: String) -> Result<String, String> {
         // Find the server
         let server_name = {
-            let server = self.mcp_servers.iter_mut()
+            let server = self
+                .mcp_servers
+                .iter_mut()
                 .find(|s| s.id == server_id)
                 .ok_or_else(|| format!("MCP server {} not found", server_id))?;
             server.connected = false;
@@ -386,7 +475,9 @@ impl SpiderState {
         };
 
         // Find and close the WebSocket connection
-        let channel_to_close = self.ws_connections.iter()
+        let channel_to_close = self
+            .ws_connections
+            .iter()
             .find(|(_, conn)| conn.server_id == server_id)
             .map(|(id, _)| *id);
 
@@ -398,7 +489,8 @@ impl SpiderState {
             self.ws_connections.remove(&channel_id);
 
             // Clean up any pending requests for this server
-            self.pending_mcp_requests.retain(|_, req| req.server_id != server_id);
+            self.pending_mcp_requests
+                .retain(|_, req| req.server_id != server_id);
         }
 
         Ok(format!("Disconnected from MCP server {}", server_name))
@@ -424,7 +516,9 @@ impl SpiderState {
     async fn connect_mcp_server(&mut self, server_id: String) -> Result<String, String> {
         // Find the server and get its transport config
         let (server_name, transport) = {
-            let server = self.mcp_servers.iter()
+            let server = self
+                .mcp_servers
+                .iter()
                 .find(|s| s.id == server_id)
                 .ok_or_else(|| format!("MCP server {} not found", server_id))?;
             (server.name.clone(), server.transport.clone())
@@ -433,7 +527,9 @@ impl SpiderState {
         // For WebSocket-wrapped stdio servers, connect via WebSocket
         if transport.transport_type == "websocket" || transport.transport_type == "stdio" {
             // Get WebSocket URL (ws-mcp wrapper should be running)
-            let ws_url = transport.url.clone()
+            let ws_url = transport
+                .url
+                .clone()
                 .unwrap_or_else(|| "ws://localhost:10125".to_string());
 
             // Allocate a channel ID for this connection
@@ -441,30 +537,37 @@ impl SpiderState {
             self.next_channel_id += 1;
 
             // Open WebSocket connection
-            open_ws_connection(ws_url.clone(), None, channel_id).await
+            open_ws_connection(ws_url.clone(), None, channel_id)
+                .await
                 .map_err(|e| format!("Failed to connect to MCP server: {:?}", e))?;
 
             // Store connection info
-            self.ws_connections.insert(channel_id, WsConnection {
-                server_id: server_id.clone(),
-                server_name: server_name.clone(),
+            self.ws_connections.insert(
                 channel_id,
-                tools: Vec::new(),
-                initialized: false,
-            });
+                WsConnection {
+                    server_id: server_id.clone(),
+                    server_name: server_name.clone(),
+                    channel_id,
+                    tools: Vec::new(),
+                    initialized: false,
+                },
+            );
 
             // Send initialize request
             let init_request = JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 method: "initialize".to_string(),
-                params: Some(serde_json::to_value(McpInitializeParams {
-                    protocol_version: "2024-11-05".to_string(),
-                    client_info: McpClientInfo {
-                        name: "spider".to_string(),
-                        version: "1.0.0".to_string(),
-                    },
-                    capabilities: McpCapabilities {},
-                }).unwrap()),
+                params: Some(
+                    serde_json::to_value(McpInitializeParams {
+                        protocol_version: "2024-11-05".to_string(),
+                        client_info: McpClientInfo {
+                            name: "spider".to_string(),
+                            version: "1.0.0".to_string(),
+                        },
+                        capabilities: McpCapabilities {},
+                    })
+                    .unwrap(),
+                ),
                 id: format!("init_{}", channel_id),
             };
 
@@ -476,11 +579,14 @@ impl SpiderState {
                     conversation_id: None,
                     server_id: server_id.clone(),
                     request_type: McpRequestType::Initialize,
-                }
+                },
             );
 
             // Send the initialize message
-            let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&init_request).unwrap().into_bytes());
+            let blob = LazyLoadBlob::new(
+                Some("application/json"),
+                serde_json::to_string(&init_request).unwrap().into_bytes(),
+            );
             send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
             // Mark server as connecting (will be marked connected when initialized)
@@ -488,7 +594,10 @@ impl SpiderState {
                 server.connected = false; // Will be set to true when initialization completes
             }
 
-            Ok(format!("Connecting to MCP server {} via WebSocket...", server_name))
+            Ok(format!(
+                "Connecting to MCP server {} via WebSocket...",
+                server_name
+            ))
         } else {
             // For other transport types, use the old method for now
             let tools = discover_mcp_tools(&transport).await?;
@@ -500,15 +609,26 @@ impl SpiderState {
                 server.connected = true;
             }
 
-            Ok(format!("Connected to MCP server {} with {} tools", server_name, tool_count))
+            Ok(format!(
+                "Connected to MCP server {} with {} tools",
+                server_name, tool_count
+            ))
         }
     }
 
     #[http]
-    async fn list_conversations(&self, request: ListConversationsRequest) -> Result<Vec<Conversation>, String> {
-        let conversations: Vec<Conversation> = self.active_conversations.iter()
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<Vec<Conversation>, String> {
+        let conversations: Vec<Conversation> = self
+            .active_conversations
+            .iter()
             .filter(|(_, conv)| {
-                request.client.as_ref().map_or(true, |c| &conv.metadata.client == c)
+                request
+                    .client
+                    .as_ref()
+                    .map_or(true, |c| &conv.metadata.client == c)
             })
             .map(|(_, conv)| conv.clone())
             .skip(request.offset.unwrap_or(0) as usize)
@@ -564,7 +684,10 @@ impl SpiderState {
     }
 
     #[local]
-    async fn process_request(&mut self, request: ProcessRequest) -> Result<ProcessResponse, String> {
+    async fn process_request(
+        &mut self,
+        request: ProcessRequest,
+    ) -> Result<ProcessResponse, String> {
         match request.action.as_str() {
             "chat" => {
                 let chat_request: ChatRequest = serde_json::from_str(&request.payload)
@@ -577,12 +700,10 @@ impl SpiderState {
                     data: serialized,
                 })
             }
-            _ => {
-                Ok(ProcessResponse {
-                    success: false,
-                    data: format!("Unknown action: {}", request.action),
-                })
-            }
+            _ => Ok(ProcessResponse {
+                success: false,
+                data: format!("Unknown action: {}", request.action),
+            }),
         }
     }
 }
@@ -593,10 +714,15 @@ impl SpiderState {
     }
 
     // Streaming version of chat for WebSocket clients
-    async fn process_chat_request_with_streaming(&mut self, request: ChatRequest, channel_id: u32) -> Result<ChatResponse, String> {
+    async fn process_chat_request_with_streaming(
+        &mut self,
+        request: ChatRequest,
+        channel_id: u32,
+    ) -> Result<ChatResponse, String> {
         // Create a cancellation flag for this request
         let cancel_flag = Arc::new(AtomicBool::new(false));
-        self.active_chat_cancellation.insert(channel_id, cancel_flag.clone());
+        self.active_chat_cancellation
+            .insert(channel_id, cancel_flag.clone());
 
         // Send initial status
         let status_msg = WsServerMessage::Status {
@@ -604,7 +730,11 @@ impl SpiderState {
             message: Some("Starting chat processing...".to_string()),
         };
         let json = serde_json::to_string(&status_msg).unwrap();
-        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+        send_ws_push(
+            channel_id,
+            WsMessageType::Text,
+            LazyLoadBlob::new(Some("application/json"), json),
+        );
 
         // Use the regular chat processing but send streaming updates
         let result = self.process_chat_internal(request, Some(channel_id)).await;
@@ -618,13 +748,21 @@ impl SpiderState {
             message: None,
         };
         let json = serde_json::to_string(&status_msg).unwrap();
-        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+        send_ws_push(
+            channel_id,
+            WsMessageType::Text,
+            LazyLoadBlob::new(Some("application/json"), json),
+        );
 
         result
     }
 
     // Internal chat processing logic shared by HTTP and WebSocket
-    async fn process_chat_internal(&mut self, request: ChatRequest, channel_id: Option<u32>) -> Result<ChatResponse, String> {
+    async fn process_chat_internal(
+        &mut self,
+        request: ChatRequest,
+        channel_id: Option<u32>,
+    ) -> Result<ChatResponse, String> {
         // This is a refactored version of the chat logic that can send WebSocket updates
         // For now, just call the regular chat method
         // TODO: Refactor the chat method to use this shared logic
@@ -638,7 +776,9 @@ impl SpiderState {
         }
 
         // Check permissions
-        let spider_key = self.spider_api_keys.iter()
+        let spider_key = self
+            .spider_api_keys
+            .iter()
             .find(|k| k.key == request.api_key)
             .ok_or("Unauthorized: Invalid Spider API key")?;
 
@@ -647,13 +787,19 @@ impl SpiderState {
         }
 
         let conversation_id = Uuid::new_v4().to_string();
-        let llm_provider = request.llm_provider.unwrap_or(self.default_llm_provider.clone());
+        let llm_provider = request
+            .llm_provider
+            .unwrap_or(self.default_llm_provider.clone());
 
-        println!("Spider: Starting new conversation {} with provider {} (key: {})",
-                 conversation_id, llm_provider, spider_key.name);
+        println!(
+            "Spider: Starting new conversation {} with provider {} (key: {})",
+            conversation_id, llm_provider, spider_key.name
+        );
 
         // Get the API key for the selected provider and decrypt it
-        let encrypted_key = self.api_keys.iter()
+        let encrypted_key = self
+            .api_keys
+            .iter()
             .find(|(p, _)| p == &llm_provider)
             .map(|(_, k)| k.key.clone())
             .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?;
@@ -661,13 +807,15 @@ impl SpiderState {
 
         // Collect available tools from connected MCP servers
         let available_tools: Vec<Tool> = if let Some(ref mcp_server_ids) = request.mcp_servers {
-            self.mcp_servers.iter()
+            self.mcp_servers
+                .iter()
                 .filter(|s| s.connected && mcp_server_ids.contains(&s.id))
                 .flat_map(|s| s.tools.clone())
                 .collect()
         } else {
             // Use all connected servers if none specified
-            self.mcp_servers.iter()
+            self.mcp_servers
+                .iter()
                 .filter(|s| s.connected)
                 .flat_map(|s| s.tools.clone())
                 .collect()
@@ -685,7 +833,10 @@ impl SpiderState {
                 if let Some(cancel_flag) = self.active_chat_cancellation.get(&ch_id) {
                     let is_cancelled = cancel_flag.load(Ordering::Relaxed);
                     if is_cancelled {
-                        println!("Spider: Chat request cancelled at iteration {}", iteration_count);
+                        println!(
+                            "Spider: Chat request cancelled at iteration {}",
+                            iteration_count
+                        );
                         return Err("Request cancelled by user".to_string());
                     }
                 }
@@ -697,12 +848,24 @@ impl SpiderState {
                     tool_calls: None,
                 };
                 let json = serde_json::to_string(&stream_msg).unwrap();
-                send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                send_ws_push(
+                    ch_id,
+                    WsMessageType::Text,
+                    LazyLoadBlob::new(Some("application/json"), json),
+                );
             }
 
             // Call the LLM with available tools using the provider abstraction
             let provider = create_llm_provider(&llm_provider, &api_key);
-            let llm_response = match provider.complete(&working_messages, &available_tools, self.max_tokens, self.temperature).await {
+            let llm_response = match provider
+                .complete(
+                    &working_messages,
+                    &available_tools,
+                    self.max_tokens,
+                    self.temperature,
+                )
+                .await
+            {
                 Ok(response) => response,
                 Err(e) => {
                     // Log the error for debugging
@@ -710,23 +873,35 @@ impl SpiderState {
 
                     // Check if it's an API key error
                     if e.contains("401") || e.contains("unauthorized") || e.contains("api key") {
-                        return Err(format!("Authentication failed for {}: Please check your API key", llm_provider));
+                        return Err(format!(
+                            "Authentication failed for {}: Please check your API key",
+                            llm_provider
+                        ));
                     }
 
                     // Check if it's a rate limit error
                     if e.contains("429") || e.contains("rate limit") {
-                        return Err(format!("Rate limited by {}: Please try again later", llm_provider));
+                        return Err(format!(
+                            "Rate limited by {}: Please try again later",
+                            llm_provider
+                        ));
                     }
 
                     // Return user-friendly error message
-                    return Err(format!("Failed to get response from {}: {}", llm_provider, e));
+                    return Err(format!(
+                        "Failed to get response from {}: {}",
+                        llm_provider, e
+                    ));
                 }
             };
 
             // Check if the response contains tool calls
             if let Some(ref tool_calls_json) = llm_response.tool_calls_json {
                 // The agent wants to use tools - execute them
-                println!("Spider: Iteration {} - Agent requested tool calls", iteration_count);
+                println!(
+                    "Spider: Iteration {} - Agent requested tool calls",
+                    iteration_count
+                );
 
                 // Send streaming update for tool calls
                 if let Some(ch_id) = channel_id {
@@ -736,10 +911,16 @@ impl SpiderState {
                         tool_calls: Some(tool_calls_json.clone()),
                     };
                     let json = serde_json::to_string(&stream_msg).unwrap();
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                    send_ws_push(
+                        ch_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob::new(Some("application/json"), json),
+                    );
                 }
 
-                let tool_results = self.process_tool_calls(tool_calls_json, Some(conversation_id.clone())).await?;
+                let tool_results = self
+                    .process_tool_calls(tool_calls_json, Some(conversation_id.clone()))
+                    .await?;
 
                 // Add the assistant's message with tool calls
                 working_messages.push(llm_response.clone());
@@ -750,7 +931,11 @@ impl SpiderState {
                         message: llm_response.clone(),
                     };
                     let json = serde_json::to_string(&msg_update).unwrap();
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                    send_ws_push(
+                        ch_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob::new(Some("application/json"), json),
+                    );
                 }
 
                 // Add tool results as a new message for the LLM to see
@@ -769,7 +954,11 @@ impl SpiderState {
                         message: tool_message.clone(),
                     };
                     let json = serde_json::to_string(&msg_update).unwrap();
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                    send_ws_push(
+                        ch_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob::new(Some("application/json"), json),
+                    );
                 }
 
                 // Continue the loop - the agent will decide what to do next
@@ -777,7 +966,10 @@ impl SpiderState {
             } else {
                 // No tool calls - the agent has decided to provide a final response
                 // Break the loop and return this response
-                println!("Spider: Iteration {} - Agent provided final response (no tool calls)", iteration_count);
+                println!(
+                    "Spider: Iteration {} - Agent provided final response (no tool calls)",
+                    iteration_count
+                );
 
                 // Send the final assistant message to the client
                 if let Some(ch_id) = channel_id {
@@ -785,7 +977,11 @@ impl SpiderState {
                         message: llm_response.clone(),
                     };
                     let json = serde_json::to_string(&msg_update).unwrap();
-                    send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob::new(Some("application/json"), json));
+                    send_ws_push(
+                        ch_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob::new(Some("application/json"), json),
+                    );
                 }
 
                 break llm_response;
@@ -820,7 +1016,8 @@ impl SpiderState {
         }
 
         // Keep in memory for quick access
-        self.active_conversations.push((conversation_id.clone(), conversation));
+        self.active_conversations
+            .push((conversation_id.clone(), conversation));
 
         Ok(ChatResponse {
             conversation_id,
@@ -834,7 +1031,10 @@ impl SpiderState {
         let conn = match self.ws_connections.get(&channel_id) {
             Some(c) => c.clone(),
             None => {
-                println!("Spider: Received MCP message for unknown channel {}", channel_id);
+                println!(
+                    "Spider: Received MCP message for unknown channel {}",
+                    channel_id
+                );
                 return;
             }
         };
@@ -870,9 +1070,17 @@ impl SpiderState {
         }
     }
 
-    fn handle_initialize_response(&mut self, channel_id: u32, conn: &WsConnection, message: &Value) {
+    fn handle_initialize_response(
+        &mut self,
+        channel_id: u32,
+        conn: &WsConnection,
+        message: &Value,
+    ) {
         if let Some(_result) = message.get("result") {
-            println!("Spider: MCP server {} initialized successfully", conn.server_name);
+            println!(
+                "Spider: MCP server {} initialized successfully",
+                conn.server_name
+            );
 
             // Mark connection as initialized
             if let Some(ws_conn) = self.ws_connections.get_mut(&channel_id) {
@@ -885,13 +1093,19 @@ impl SpiderState {
                 method: "notifications/initialized".to_string(),
                 params: None,
             };
-            let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&notif).unwrap().into_bytes());
+            let blob = LazyLoadBlob::new(
+                Some("application/json"),
+                serde_json::to_string(&notif).unwrap().into_bytes(),
+            );
             send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
             // Request tools list
             self.request_tools_list(channel_id);
         } else if let Some(error) = message.get("error") {
-            println!("Spider: Failed to initialize MCP server {}: {:?}", conn.server_name, error);
+            println!(
+                "Spider: Failed to initialize MCP server {}: {:?}",
+                conn.server_name, error
+            );
         }
     }
 
@@ -913,15 +1127,23 @@ impl SpiderState {
                     conversation_id: None,
                     server_id: conn.server_id.clone(),
                     request_type: McpRequestType::ToolsList,
-                }
+                },
             );
         }
 
-        let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&tools_request).unwrap().into_bytes());
+        let blob = LazyLoadBlob::new(
+            Some("application/json"),
+            serde_json::to_string(&tools_request).unwrap().into_bytes(),
+        );
         send_ws_client_push(channel_id, WsMessageType::Text, blob);
     }
 
-    fn handle_tools_list_response(&mut self, channel_id: u32, conn: &WsConnection, message: &Value) {
+    fn handle_tools_list_response(
+        &mut self,
+        channel_id: u32,
+        conn: &WsConnection,
+        message: &Value,
+    ) {
         if let Some(result) = message.get("result") {
             if let Some(tools_json) = result.get("tools").and_then(|v| v.as_array()) {
                 let mut tools = Vec::new();
@@ -929,15 +1151,17 @@ impl SpiderState {
                 for tool_json in tools_json {
                     if let (Some(name), Some(description)) = (
                         tool_json.get("name").and_then(|v| v.as_str()),
-                        tool_json.get("description").and_then(|v| v.as_str())
+                        tool_json.get("description").and_then(|v| v.as_str()),
                     ) {
                         // Store both the old parameters format and the new inputSchema
-                        let parameters = tool_json.get("parameters")
+                        let parameters = tool_json
+                            .get("parameters")
                             .map(|p| p.to_string())
                             .unwrap_or_else(|| "{}".to_string());
 
                         // Store the complete inputSchema if available as a JSON string
-                        let input_schema_json = tool_json.get("inputSchema")
+                        let input_schema_json = tool_json
+                            .get("inputSchema")
                             .map(|schema| schema.to_string());
 
                         tools.push(Tool {
@@ -950,7 +1174,10 @@ impl SpiderState {
                 }
 
                 let tool_count = tools.len();
-                println!("Spider: Received {} tools from MCP server {}", tool_count, conn.server_name);
+                println!(
+                    "Spider: Received {} tools from MCP server {}",
+                    tool_count, conn.server_name
+                );
 
                 // Update connection with tools
                 if let Some(ws_conn) = self.ws_connections.get_mut(&channel_id) {
@@ -964,13 +1191,18 @@ impl SpiderState {
                 }
             }
         } else if let Some(error) = message.get("error") {
-            println!("Spider: Failed to get tools from MCP server {}: {:?}", conn.server_name, error);
+            println!(
+                "Spider: Failed to get tools from MCP server {}: {:?}",
+                conn.server_name, error
+            );
         }
     }
 
     fn handle_tool_call_response(&mut self, pending: &PendingMcpRequest, message: &Value) {
-        println!("Spider: Received tool call response for request {}: {:?}",
-                 pending.request_id, message);
+        println!(
+            "Spider: Received tool call response for request {}: {:?}",
+            pending.request_id, message
+        );
 
         // Store the response so execute_mcp_tool can retrieve it
         let result = if let Some(result_value) = message.get("result") {
@@ -985,21 +1217,34 @@ impl SpiderState {
             })
         };
 
-        self.tool_responses.insert(pending.request_id.clone(), result);
+        self.tool_responses
+            .insert(pending.request_id.clone(), result);
     }
 
-    async fn execute_mcp_tool(&mut self, server_id: &str, tool_name: &str, parameters: &Value, conversation_id: Option<String>) -> Result<Value, String> {
-        let server = self.mcp_servers.iter()
+    async fn execute_mcp_tool(
+        &mut self,
+        server_id: &str,
+        tool_name: &str,
+        parameters: &Value,
+        conversation_id: Option<String>,
+    ) -> Result<Value, String> {
+        let server = self
+            .mcp_servers
+            .iter()
             .find(|s| s.id == server_id && s.connected)
             .ok_or_else(|| format!("MCP server {} not found or not connected", server_id))?;
 
         // Check if the tool exists
-        let _tool = server.tools.iter()
+        let _tool = server
+            .tools
+            .iter()
             .find(|t| t.name == tool_name)
             .ok_or_else(|| format!("Tool {} not found on server {}", tool_name, server_id))?;
 
         // Find the WebSocket connection for this server
-        let channel_id = self.ws_connections.iter()
+        let channel_id = self
+            .ws_connections
+            .iter()
             .find(|(_, conn)| conn.server_id == server_id)
             .map(|(id, _)| *id)
             .ok_or_else(|| format!("No WebSocket connection found for server {}", server_id))?;
@@ -1013,10 +1258,13 @@ impl SpiderState {
                 let tool_request = JsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
                     method: "tools/call".to_string(),
-                    params: Some(serde_json::to_value(McpToolCallParams {
-                        name: tool_name.to_string(),
-                        arguments: parameters.clone(),
-                    }).unwrap()),
+                    params: Some(
+                        serde_json::to_value(McpToolCallParams {
+                            name: tool_name.to_string(),
+                            arguments: parameters.clone(),
+                        })
+                        .unwrap(),
+                    ),
                     id: request_id.clone(),
                 };
 
@@ -1027,13 +1275,21 @@ impl SpiderState {
                         request_id: request_id.clone(),
                         conversation_id: conversation_id.clone(),
                         server_id: server_id.to_string(),
-                        request_type: McpRequestType::ToolCall { tool_name: tool_name.to_string() },
-                    }
+                        request_type: McpRequestType::ToolCall {
+                            tool_name: tool_name.to_string(),
+                        },
+                    },
                 );
 
                 // Send the tool call to MCP server
-                println!("Spider: Sending tool call {} to MCP server {} with request_id {}", tool_name, server_id, request_id);
-                let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&tool_request).unwrap().into_bytes());
+                println!(
+                    "Spider: Sending tool call {} to MCP server {} with request_id {}",
+                    tool_name, server_id, request_id
+                );
+                let blob = LazyLoadBlob::new(
+                    Some("application/json"),
+                    serde_json::to_string(&tool_request).unwrap().into_bytes(),
+                );
                 send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
                 // Wait for response with async polling
@@ -1050,7 +1306,8 @@ impl SpiderState {
                             return Ok(serde_json::to_value(ToolExecutionResult {
                                 result: content.clone(),
                                 success: true,
-                            }).unwrap());
+                            })
+                            .unwrap());
                         } else {
                             return Ok(response);
                         }
@@ -1059,7 +1316,10 @@ impl SpiderState {
                     // Check timeout
                     if start.elapsed() > timeout {
                         self.pending_mcp_requests.remove(&request_id);
-                        return Err(format!("Tool call {} timed out after 60 seconds", tool_name));
+                        return Err(format!(
+                            "Tool call {} timed out after 60 seconds",
+                            tool_name
+                        ));
                     }
 
                     // Sleep briefly to yield to other tasks
@@ -1071,15 +1331,26 @@ impl SpiderState {
                 // Execute via HTTP
                 // This is a placeholder - actual implementation would make HTTP requests
                 Ok(serde_json::to_value(ToolExecutionResult {
-                    result: serde_json::json!(format!("HTTP execution of {} with params: {}", tool_name, parameters)),
+                    result: serde_json::json!(format!(
+                        "HTTP execution of {} with params: {}",
+                        tool_name, parameters
+                    )),
                     success: true,
-                }).unwrap())
+                })
+                .unwrap())
             }
-            _ => Err(format!("Unsupported transport type: {}", server.transport.transport_type))
+            _ => Err(format!(
+                "Unsupported transport type: {}",
+                server.transport.transport_type
+            )),
         }
     }
 
-    async fn process_tool_calls(&mut self, tool_calls_json: &str, conversation_id: Option<String>) -> Result<Vec<ToolResult>, String> {
+    async fn process_tool_calls(
+        &mut self,
+        tool_calls_json: &str,
+        conversation_id: Option<String>,
+    ) -> Result<Vec<ToolResult>, String> {
         let tool_calls: Vec<ToolCall> = serde_json::from_str(tool_calls_json)
             .map_err(|e| format!("Failed to parse tool calls: {}", e))?;
 
@@ -1087,7 +1358,9 @@ impl SpiderState {
 
         for tool_call in tool_calls {
             // Find which MCP server has this tool and get its ID
-            let server_id = self.mcp_servers.iter()
+            let server_id = self
+                .mcp_servers
+                .iter()
                 .find(|s| s.connected && s.tools.iter().any(|t| t.name == tool_call.tool_name))
                 .map(|s| s.id.clone());
 
@@ -1095,12 +1368,23 @@ impl SpiderState {
                 let params: Value = serde_json::from_str(&tool_call.parameters)
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
-                match self.execute_mcp_tool(&server_id, &tool_call.tool_name, &params, conversation_id.clone()).await {
+                match self
+                    .execute_mcp_tool(
+                        &server_id,
+                        &tool_call.tool_name,
+                        &params,
+                        conversation_id.clone(),
+                    )
+                    .await
+                {
                     Ok(res) => res.to_string(),
-                    Err(e) => format!(r#"{{"error":"{}"}}"#, e)
+                    Err(e) => format!(r#"{{"error":"{}"}}"#, e),
                 }
             } else {
-                format!(r#"{{"error":"Tool {} not found in any connected MCP server"}}"#, tool_call.tool_name)
+                format!(
+                    r#"{{"error":"Tool {} not found in any connected MCP server"}}"#,
+                    tool_call.tool_name
+                )
             };
 
             results.push(ToolResult {

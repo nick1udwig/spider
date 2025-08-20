@@ -7,11 +7,15 @@ mod anthropic;
 use anthropic::AnthropicProvider;
 
 pub(crate) trait LlmProvider {
-    fn complete<'a>(&'a self, messages: &'a [Message], tools: &'a [Tool], max_tokens: u32, temperature: f32)
-        -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>>;
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Tool],
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>>;
     fn name(&self) -> &str;
 }
-
 
 // Placeholder for future providers
 struct OpenAIProvider {
@@ -25,11 +29,14 @@ impl OpenAIProvider {
 }
 
 impl LlmProvider for OpenAIProvider {
-    fn complete<'a>(&'a self, _messages: &'a [Message], _tools: &'a [Tool], _max_tokens: u32, _temperature: f32)
-        -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
-        Box::pin(async move {
-            Err("OpenAI provider not yet implemented".to_string())
-        })
+    fn complete<'a>(
+        &'a self,
+        _messages: &'a [Message],
+        _tools: &'a [Tool],
+        _max_tokens: u32,
+        _temperature: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
+        Box::pin(async move { Err("OpenAI provider not yet implemented".to_string()) })
     }
 
     fn name(&self) -> &str {

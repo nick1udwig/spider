@@ -5,9 +5,8 @@ use chrono::Utc;
 use serde_json::Value;
 
 use hyperware_anthropic_sdk::{
-    AnthropicClient, CreateMessageRequest, Message as SdkMessage,
-    Role, Content, ResponseContentBlock, Tool as SdkTool,
-    ToolChoice
+    AnthropicClient, Content, CreateMessageRequest, Message as SdkMessage, ResponseContentBlock,
+    Role, Tool as SdkTool, ToolChoice,
 };
 
 use crate::provider::LlmProvider;
@@ -24,11 +23,17 @@ impl AnthropicProvider {
 }
 
 impl LlmProvider for AnthropicProvider {
-    fn complete<'a>(&'a self, messages: &'a [Message], tools: &'a [Tool], max_tokens: u32, temperature: f32)
-        -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Tool],
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
         Box::pin(async move {
             // For simplicity in WASM, skip retry logic for now
-            self.complete_with_retry(messages, tools, max_tokens, temperature).await
+            self.complete_with_retry(messages, tools, max_tokens, temperature)
+                .await
         })
     }
 
@@ -50,9 +55,12 @@ impl AnthropicProvider {
         }
 
         // Handle $defs and resolve references if present
-        let resolved_schema = if mcp_schema.get("$defs").is_some() || mcp_schema.as_object()
-            .map(|o| o.keys().any(|k| k.contains("$ref")))
-            .unwrap_or(false) {
+        let resolved_schema = if mcp_schema.get("$defs").is_some()
+            || mcp_schema
+                .as_object()
+                .map(|o| o.keys().any(|k| k.contains("$ref")))
+                .unwrap_or(false)
+        {
             self.resolve_schema_refs(mcp_schema, mcp_schema.get("$defs"))
         } else {
             mcp_schema.clone()
@@ -86,7 +94,10 @@ impl AnthropicProvider {
                                 if let Value::Object(def_map) = resolved_def {
                                     for (def_key, def_value) in def_map {
                                         if def_key != "$ref" {
-                                            resolved.insert(def_key, self.resolve_schema_refs(&def_value, defs));
+                                            resolved.insert(
+                                                def_key,
+                                                self.resolve_schema_refs(&def_value, defs),
+                                            );
                                         }
                                     }
                                 }
@@ -100,9 +111,11 @@ impl AnthropicProvider {
 
                 Value::Object(resolved)
             }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(|v| self.resolve_schema_refs(v, defs)).collect())
-            }
+            Value::Array(arr) => Value::Array(
+                arr.iter()
+                    .map(|v| self.resolve_schema_refs(v, defs))
+                    .collect(),
+            ),
             other => other.clone(),
         }
     }
@@ -149,10 +162,22 @@ impl AnthropicProvider {
 
                 for (key, val) in map {
                     // Only keep standard JSON Schema properties for Anthropic
-                    if matches!(key.as_str(), "type" | "description" | "properties" |
-                               "required" | "items" | "enum" | "const" |
-                               "minimum" | "maximum" | "minLength" | "maxLength" |
-                               "pattern" | "format") {
+                    if matches!(
+                        key.as_str(),
+                        "type"
+                            | "description"
+                            | "properties"
+                            | "required"
+                            | "items"
+                            | "enum"
+                            | "const"
+                            | "minimum"
+                            | "maximum"
+                            | "minLength"
+                            | "maxLength"
+                            | "pattern"
+                            | "format"
+                    ) {
                         cleaned.insert(key.clone(), self.clean_schema_value_for_anthropic(val));
                     }
                     // Special handling for default - only include if there's also a type
@@ -173,15 +198,18 @@ impl AnthropicProvider {
                             Value::Object(_) => "object",
                             Value::Null => "null",
                         };
-                        cleaned.insert("type".to_string(), Value::String(inferred_type.to_string()));
+                        cleaned
+                            .insert("type".to_string(), Value::String(inferred_type.to_string()));
                     }
                 }
 
                 Value::Object(cleaned)
             }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(|v| self.clean_schema_value_for_anthropic(v)).collect())
-            }
+            Value::Array(arr) => Value::Array(
+                arr.iter()
+                    .map(|v| self.clean_schema_value_for_anthropic(v))
+                    .collect(),
+            ),
             other => other.clone(),
         }
     }
@@ -189,12 +217,20 @@ impl AnthropicProvider {
     // Validate property names against Anthropic's pattern
     fn is_valid_anthropic_property_name(&self, name: &str) -> bool {
         // Pattern: ^[a-zA-Z0-9_.-]{1,64}$
-        name.len() <= 64 &&
-        name.len() >= 1 &&
-        name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+        name.len() <= 64
+            && name.len() >= 1
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
     }
 
-    async fn complete_with_retry(&self, messages: &[Message], tools: &[Tool], max_tokens: u32, temperature: f32) -> Result<Message, String> {
+    async fn complete_with_retry(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Result<Message, String> {
         // Initialize the Anthropic SDK client
         let client = AnthropicClient::new(&self.api_key);
 
@@ -212,13 +248,16 @@ impl AnthropicProvider {
             // Handle different message types
             let content = if let Some(tool_results_json) = &msg.tool_results_json {
                 // Parse tool results and format them for the SDK
-                let tool_results: Vec<ToolResult> = serde_json::from_str(tool_results_json)
-                    .unwrap_or_else(|_| Vec::new());
+                let tool_results: Vec<ToolResult> =
+                    serde_json::from_str(tool_results_json).unwrap_or_else(|_| Vec::new());
 
                 // Format tool results as text content
                 let mut result_text = String::from("Tool execution results:\n");
                 for result in tool_results {
-                    result_text.push_str(&format!("- Tool call {}: {}\n", result.tool_call_id, result.result));
+                    result_text.push_str(&format!(
+                        "- Tool call {}: {}\n",
+                        result.tool_call_id, result.result
+                    ));
                 }
                 Content::Text(result_text)
             } else if let Some(_tool_calls_json) = &msg.tool_calls_json {
@@ -233,41 +272,50 @@ impl AnthropicProvider {
         }
 
         // Convert our Tool format to SDK Tool format
-        let sdk_tools: Vec<SdkTool> = tools.iter().map(|tool| {
-            // Parse the MCP schema from either inputSchema or parameters
-            let mcp_schema = if let Some(ref input_schema_json) = tool.input_schema_json {
-                serde_json::from_str::<Value>(input_schema_json)
-                    .unwrap_or_else(|_| serde_json::json!({}))
-            } else {
-                serde_json::from_str::<Value>(&tool.parameters)
-                    .unwrap_or_else(|_| serde_json::json!({}))
-            };
+        let sdk_tools: Vec<SdkTool> = tools
+            .iter()
+            .map(|tool| {
+                // Parse the MCP schema from either inputSchema or parameters
+                let mcp_schema = if let Some(ref input_schema_json) = tool.input_schema_json {
+                    serde_json::from_str::<Value>(input_schema_json)
+                        .unwrap_or_else(|_| serde_json::json!({}))
+                } else {
+                    serde_json::from_str::<Value>(&tool.parameters)
+                        .unwrap_or_else(|_| serde_json::json!({}))
+                };
 
-            // Transform MCP schema to Anthropic-compatible format
-            let anthropic_schema = self.transform_mcp_to_anthropic_schema(&mcp_schema);
+                // Transform MCP schema to Anthropic-compatible format
+                let anthropic_schema = self.transform_mcp_to_anthropic_schema(&mcp_schema);
 
-            // Debug: Log the transformed schema
-            println!("Spider: Tool {} transformed schema: {}", tool.name, serde_json::to_string_pretty(&anthropic_schema).unwrap_or_else(|_| "error".to_string()));
+                // Debug: Log the transformed schema
+                println!(
+                    "Spider: Tool {} transformed schema: {}",
+                    tool.name,
+                    serde_json::to_string_pretty(&anthropic_schema)
+                        .unwrap_or_else(|_| "error".to_string())
+                );
 
-            // Extract required fields from the transformed schema
-            let required = anthropic_schema.get("required")
-                .and_then(|r| r.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_else(Vec::new);
+                // Extract required fields from the transformed schema
+                let required = anthropic_schema
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_else(Vec::new);
 
-            SdkTool::new(
-                tool.name.clone(),
-                tool.description.clone(),
-                anthropic_schema["properties"].clone(),
-                required,
-                None,
-                //anthropic_schema.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            )
-        }).collect();
+                SdkTool::new(
+                    tool.name.clone(),
+                    tool.description.clone(),
+                    anthropic_schema["properties"].clone(),
+                    required,
+                    None,
+                    //anthropic_schema.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                )
+            })
+            .collect();
 
         // Create the request
         let mut request = CreateMessageRequest::new(
@@ -275,20 +323,24 @@ impl AnthropicProvider {
             "claude-sonnet-4-20250514",
             sdk_messages,
             max_tokens,
-        ).with_temperature(temperature);
+        )
+        .with_temperature(temperature);
 
         println!("Tools: {sdk_tools:?}");
 
         // Add tools if any
         if !sdk_tools.is_empty() {
-            request = request.with_tools(sdk_tools)
+            request = request
+                .with_tools(sdk_tools)
                 .with_tool_choice(ToolChoice::Auto {
-                    disable_parallel_tool_use: Some(false)
+                    disable_parallel_tool_use: Some(false),
                 });
         }
 
         // Send the message using the SDK
-        let response = client.send_message(request).await
+        let response = client
+            .send_message(request)
+            .await
             .map_err(|e| format!("Failed to send message via SDK: {:?}", e))?;
 
         // Convert SDK response back to our Message format
