@@ -130,7 +130,9 @@ struct TransportConfig {
 struct Tool {
     name: String,
     description: String,
-    parameters: String,
+    parameters: String,  // Deprecated: use input_schema_json instead
+    #[serde(rename = "inputSchema")]
+    input_schema_json: Option<String>,  // Complete JSON schema as string including $defs, annotations, etc.
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -258,13 +260,13 @@ struct ProcessResponse {
 #[serde(tag = "type")]
 enum WsClientMessage {
     #[serde(rename = "auth")]
-    Auth { 
+    Auth {
         #[serde(rename = "apiKey")]
-        api_key: String 
+        api_key: String
     },
     #[serde(rename = "chat")]
-    Chat { 
-        payload: WsChatPayload 
+    Chat {
+        payload: WsChatPayload
     },
     #[serde(rename = "cancel")]
     Cancel,
@@ -286,17 +288,17 @@ struct WsChatPayload {
 #[serde(tag = "type")]
 enum WsServerMessage {
     #[serde(rename = "auth_success")]
-    AuthSuccess { 
-        message: String 
+    AuthSuccess {
+        message: String
     },
     #[serde(rename = "auth_error")]
-    AuthError { 
-        error: String 
+    AuthError {
+        error: String
     },
     #[serde(rename = "status")]
-    Status { 
+    Status {
         status: String,
-        message: Option<String> 
+        message: Option<String>
     },
     #[serde(rename = "stream")]
     Stream {
@@ -306,16 +308,16 @@ enum WsServerMessage {
         tool_calls: Option<String>,
     },
     #[serde(rename = "message")]
-    Message { 
-        message: Message 
+    Message {
+        message: Message
     },
     #[serde(rename = "chat_complete")]
-    ChatComplete { 
-        payload: ChatResponse 
+    ChatComplete {
+        payload: ChatResponse
     },
     #[serde(rename = "error")]
-    Error { 
-        error: String 
+    Error {
+        error: String
     },
     #[serde(rename = "pong")]
     Pong,
@@ -366,7 +368,7 @@ impl SpiderState {
 
         // VFS directory creation will be handled when actually saving files
 
-        // Auto-reconnect to MCP servers that exist in state
+        // Auto-reconnect to MCP servers that exist in state with retry logic
         // Note: Don't filter by server.connected since they won't be connected on startup
         let servers_to_reconnect: Vec<String> = self.mcp_servers
             .iter()
@@ -376,14 +378,35 @@ impl SpiderState {
         for server_id in servers_to_reconnect {
             println!("Auto-reconnecting to MCP server: {}", server_id);
 
-            // Use the same connect_mcp_server method that the frontend uses
-            match self.connect_mcp_server(server_id.clone()).await {
-                Ok(msg) => {
-                    println!("Auto-reconnect successful: {}", msg);
+            // Retry logic with exponential backoff
+            let max_retries = 3;
+            let mut retry_delay_ms = 1000u64; // Start with 1 second
+            let mut success = false;
+
+            for attempt in 1..=max_retries {
+                match self.connect_mcp_server(server_id.clone()).await {
+                    Ok(msg) => {
+                        println!("Auto-reconnect successful: {}", msg);
+                        success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        println!("Failed to auto-reconnect to MCP server {} (attempt {}/{}): {}",
+                                 server_id, attempt, max_retries, e);
+
+                        if attempt < max_retries {
+                            println!("Retrying in {} ms...", retry_delay_ms);
+                            let _ = hyperware_process_lib::hyperapp::sleep(retry_delay_ms).await;
+
+                            // Exponential backoff with max delay of 10 seconds
+                            retry_delay_ms = (retry_delay_ms * 2).min(10000);
+                        }
+                    }
                 }
-                Err(e) => {
-                    println!("Failed to auto-reconnect to MCP server {}: {}", server_id, e);
-                }
+            }
+
+            if !success {
+                println!("Failed to reconnect to MCP server {} after {} attempts", server_id, max_retries);
             }
         }
     }
@@ -391,7 +414,7 @@ impl SpiderState {
     #[ws]
     async fn handle_websocket(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
         println!("handle_websocket {channel_id}");
-        
+
         match message_type {
             WsMessageType::Text | WsMessageType::Binary => {
                 let message_bytes = blob.bytes.clone();
@@ -468,7 +491,7 @@ impl SpiderState {
                                 if let Some(cancel_flag) = self.active_chat_cancellation.get(&channel_id) {
                                     cancel_flag.store(true, Ordering::Relaxed);
                                     println!("Spider: Cancelling chat request for channel {}", channel_id);
-                                    
+
                                     // Send cancellation confirmation
                                     let response = WsServerMessage::Status {
                                         status: "cancelled".to_string(),
@@ -646,6 +669,52 @@ impl SpiderState {
     #[http]
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, String> {
         Ok(self.mcp_servers.clone())
+    }
+
+    #[http]
+    async fn disconnect_mcp_server(&mut self, server_id: String) -> Result<String, String> {
+        // Find the server
+        let server_name = {
+            let server = self.mcp_servers.iter_mut()
+                .find(|s| s.id == server_id)
+                .ok_or_else(|| format!("MCP server {} not found", server_id))?;
+            server.connected = false;
+            server.name.clone()
+        };
+
+        // Find and close the WebSocket connection
+        let channel_to_close = self.ws_connections.iter()
+            .find(|(_, conn)| conn.server_id == server_id)
+            .map(|(id, _)| *id);
+
+        if let Some(channel_id) = channel_to_close {
+            // Send close message
+            send_ws_client_push(channel_id, WsMessageType::Close, LazyLoadBlob::default());
+
+            // Remove the connection
+            self.ws_connections.remove(&channel_id);
+
+            // Clean up any pending requests for this server
+            self.pending_mcp_requests.retain(|_, req| req.server_id != server_id);
+        }
+
+        Ok(format!("Disconnected from MCP server {}", server_name))
+    }
+
+    #[http]
+    async fn remove_mcp_server(&mut self, server_id: String) -> Result<String, String> {
+        // First disconnect if connected
+        let _ = self.disconnect_mcp_server(server_id.clone()).await;
+
+        // Remove the server from the list
+        let initial_len = self.mcp_servers.len();
+        self.mcp_servers.retain(|s| s.id != server_id);
+
+        if self.mcp_servers.len() < initial_len {
+            Ok(format!("MCP server {} removed", server_id))
+        } else {
+            Err(format!("MCP server {} not found", server_id))
+        }
     }
 
     #[http]
@@ -851,7 +920,7 @@ impl SpiderState {
         // Create a cancellation flag for this request
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.active_chat_cancellation.insert(channel_id, cancel_flag.clone());
-        
+
         // Send initial status
         let status_msg = WsServerMessage::Status {
             status: "processing".to_string(),
@@ -865,7 +934,7 @@ impl SpiderState {
 
         // Clean up cancellation flag
         self.active_chat_cancellation.remove(&channel_id);
-        
+
         // Send completion status
         let status_msg = WsServerMessage::Status {
             status: "complete".to_string(),
@@ -933,7 +1002,7 @@ impl SpiderState {
 
         let response = loop {
             iteration_count += 1;
-            
+
             // Check for cancellation
             if let Some(ch_id) = channel_id {
                 if let Some(cancel_flag) = self.active_chat_cancellation.get(&ch_id) {
@@ -943,7 +1012,7 @@ impl SpiderState {
                         return Err("Request cancelled by user".to_string());
                     }
                 }
-                
+
                 // Send streaming update
                 let stream_msg = WsServerMessage::Stream {
                     iteration: iteration_count,
@@ -1249,14 +1318,20 @@ impl SpiderState {
                         tool_json.get("name").and_then(|v| v.as_str()),
                         tool_json.get("description").and_then(|v| v.as_str())
                     ) {
+                        // Store both the old parameters format and the new inputSchema
                         let parameters = tool_json.get("parameters")
                             .map(|p| p.to_string())
                             .unwrap_or_else(|| "{}".to_string());
+
+                        // Store the complete inputSchema if available as a JSON string
+                        let input_schema_json = tool_json.get("inputSchema")
+                            .map(|schema| schema.to_string());
 
                         tools.push(Tool {
                             name: name.to_string(),
                             description: description.to_string(),
                             parameters,
+                            input_schema_json,
                         });
                     }
                 }
@@ -1296,7 +1371,7 @@ impl SpiderState {
                 "error": "Invalid MCP response format"
             })
         };
-        
+
         self.tool_responses.insert(pending.request_id.clone(), result);
     }
 
@@ -1315,11 +1390,13 @@ impl SpiderState {
                         name: "search".to_string(),
                         description: "Search for information".to_string(),
                         parameters: r#"{"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]}"#.to_string(),
+                        input_schema_json: None,
                     },
                     Tool {
                         name: "calculate".to_string(),
                         description: "Perform mathematical calculations".to_string(),
                         parameters: r#"{"type":"object","properties":{"expression":{"type":"string","description":"The mathematical expression to evaluate"}},"required":["expression"]}"#.to_string(),
+                        input_schema_json: None,
                     },
                 ])
             }
@@ -1331,6 +1408,7 @@ impl SpiderState {
                         name: "http_tool".to_string(),
                         description: "An HTTP-based MCP tool".to_string(),
                         parameters: r#"{"type":"object","properties":{"query":{"type":"string"}}}"#.to_string(),
+                        input_schema_json: None,
                     }
                 ])
             }
@@ -1359,7 +1437,7 @@ impl SpiderState {
             "stdio" | "websocket" => {
                 // Execute via WebSocket
                 let request_id = format!("tool_{}_{}", channel_id, Uuid::new_v4());
-                
+
                 let tool_request = serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "tools/call",
@@ -1385,16 +1463,16 @@ impl SpiderState {
                 println!("Spider: Sending tool call {} to MCP server {} with request_id {}", tool_name, server_id, request_id);
                 let blob = LazyLoadBlob::new(Some("application/json"), tool_request.to_string().into_bytes());
                 send_ws_client_push(channel_id, WsMessageType::Text, blob);
-                
+
                 // Wait for response with async polling
                 let start = std::time::Instant::now();
                 let timeout = std::time::Duration::from_secs(60);
-                
+
                 loop {
                     // Check if we have a response
                     if let Some(response) = self.tool_responses.remove(&request_id) {
                         self.pending_mcp_requests.remove(&request_id);
-                        
+
                         // Parse the MCP result
                         if let Some(content) = response.get("content") {
                             return Ok(serde_json::json!({
@@ -1405,13 +1483,13 @@ impl SpiderState {
                             return Ok(response);
                         }
                     }
-                    
+
                     // Check timeout
                     if start.elapsed() > timeout {
                         self.pending_mcp_requests.remove(&request_id);
                         return Err(format!("Tool call {} timed out after 60 seconds", tool_name));
                     }
-                    
+
                     // Sleep briefly to yield to other tasks
                     // This allows the event loop to process incoming messages
                     let _ = hyperware_process_lib::hyperapp::sleep(100).await;
@@ -1495,6 +1573,184 @@ impl LlmProvider for AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    // Transform MCP JSON Schema to Anthropic-compatible format
+    fn transform_mcp_to_anthropic_schema(&self, mcp_schema: &Value) -> Value {
+        // Start with basic structure
+        let mut anthropic_schema = serde_json::json!({
+            "type": "object"
+        });
+
+        if let Some(t) = mcp_schema.get("type") {
+            anthropic_schema["type"] = t.clone();
+        }
+
+        // Handle $defs and resolve references if present
+        let resolved_schema = if mcp_schema.get("$defs").is_some() || mcp_schema.as_object()
+            .map(|o| o.keys().any(|k| k.contains("$ref")))
+            .unwrap_or(false) {
+            self.resolve_schema_refs(mcp_schema, mcp_schema.get("$defs"))
+        } else {
+            mcp_schema.clone()
+        };
+
+        // Extract and clean properties
+        if let Some(properties) = resolved_schema.get("properties") {
+            anthropic_schema["properties"] = self.clean_properties_for_anthropic(properties);
+        }
+
+        // Extract required fields
+        if let Some(required) = resolved_schema.get("required") {
+            anthropic_schema["required"] = required.clone();
+        }
+
+        anthropic_schema
+    }
+
+    // Resolve JSON Schema $ref references
+    fn resolve_schema_refs(&self, schema: &Value, defs: Option<&Value>) -> Value {
+        match schema {
+            Value::Object(map) => {
+                let mut resolved = serde_json::Map::new();
+
+                for (key, value) in map {
+                    if key == "$ref" {
+                        // Resolve the reference
+                        if let Some(ref_path) = value.as_str() {
+                            if let Some(resolved_def) = self.resolve_ref_path(ref_path, defs) {
+                                // Merge the resolved definition into current level
+                                if let Value::Object(def_map) = resolved_def {
+                                    for (def_key, def_value) in def_map {
+                                        if def_key != "$ref" {
+                                            resolved.insert(def_key, self.resolve_schema_refs(&def_value, defs));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if key != "$defs" && key != "$schema" {
+                        // Recursively resolve nested schemas, skip $defs and $schema
+                        resolved.insert(key.clone(), self.resolve_schema_refs(value, defs));
+                    }
+                }
+
+                Value::Object(resolved)
+            }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(|v| self.resolve_schema_refs(v, defs)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    // Helper to resolve a $ref path
+    fn resolve_ref_path(&self, ref_path: &str, defs: Option<&Value>) -> Option<Value> {
+        // Handle references like "#/$defs/TextOrSearchReplaceBlock"
+        if ref_path.starts_with("#/$defs/") {
+            if let Some(defs) = defs {
+                let def_name = &ref_path[8..]; // Skip "#/$defs/"
+                return defs.get(def_name).cloned();
+            }
+        }
+        None
+    }
+
+    // Clean properties to ensure they match Anthropic's requirements
+    fn clean_properties_for_anthropic(&self, properties: &Value) -> Value {
+        match properties {
+            Value::Object(map) => {
+                let mut cleaned = serde_json::Map::new();
+                for (key, value) in map {
+                    // Ensure property names match Anthropic's pattern
+                    if self.is_valid_anthropic_property_name(key) {
+                        // Recursively clean the property value
+                        cleaned.insert(key.clone(), self.clean_schema_value_for_anthropic(value));
+                    }
+                }
+                Value::Object(cleaned)
+            }
+            other => other.clone(),
+        }
+    }
+
+    // Clean individual schema values
+    fn clean_schema_value_for_anthropic(&self, value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut cleaned = serde_json::Map::new();
+
+                // Check if this object has a default but no type
+                let has_default = map.contains_key("default");
+                let has_type = map.contains_key("type");
+
+                for (key, val) in map {
+                    // Only keep standard JSON Schema properties for Anthropic
+                    if matches!(key.as_str(), "type" | "description" | "properties" |
+                               "required" | "items" | "enum" | "const" |
+                               "minimum" | "maximum" | "minLength" | "maxLength" |
+                               "pattern" | "format") {
+                        cleaned.insert(key.clone(), self.clean_schema_value_for_anthropic(val));
+                    }
+                    // Special handling for default - only include if there's also a type
+                    else if key == "default" && has_type {
+                        cleaned.insert(key.clone(), val.clone());
+                    }
+                }
+
+                // If we have a default but no type, infer the type from the default value
+                if has_default && !has_type {
+                    if let Some(default_val) = map.get("default") {
+                        let inferred_type = match default_val {
+                            Value::String(_) => "string",
+                            Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                            Value::Number(_) => "number",
+                            Value::Bool(_) => "boolean",
+                            Value::Array(_) => "array",
+                            Value::Object(_) => "object",
+                            Value::Null => "null",
+                        };
+                        cleaned.insert("type".to_string(), Value::String(inferred_type.to_string()));
+                    }
+                }
+
+                Value::Object(cleaned)
+            }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(|v| self.clean_schema_value_for_anthropic(v)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    // Validate property names against Anthropic's pattern
+    fn is_valid_anthropic_property_name(&self, name: &str) -> bool {
+        // Pattern: ^[a-zA-Z0-9_.-]{1,64}$
+        name.len() <= 64 &&
+        name.len() >= 1 &&
+        name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+    }
+
+    // Legacy cleaning function - now deprecated in favor of transform_mcp_to_anthropic_schema
+    fn clean_schema_for_anthropic(&self, schema: &Value) -> Value {
+        match schema {
+            Value::Object(map) => {
+                let mut cleaned = serde_json::Map::new();
+                for (key, value) in map {
+                    // Skip non-standard JSON Schema fields that Anthropic doesn't support
+                    if key == "annotations" || key == "readOnlyHint" || key == "openWorldHint" {
+                        continue;
+                    }
+                    // Recursively clean nested values
+                    cleaned.insert(key.clone(), self.clean_schema_for_anthropic(value));
+                }
+                Value::Object(cleaned)
+            }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(|v| self.clean_schema_for_anthropic(v)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
     async fn complete_with_retry(&self, messages: &[Message], tools: &[Tool], max_tokens: u32, temperature: f32) -> Result<Message, String> {
         // Initialize the Anthropic SDK client
         let client = AnthropicClient::new(&self.api_key);
@@ -1535,11 +1791,23 @@ impl AnthropicProvider {
 
         // Convert our Tool format to SDK Tool format
         let sdk_tools: Vec<SdkTool> = tools.iter().map(|tool| {
-            let params = serde_json::from_str::<Value>(&tool.parameters)
-                .unwrap_or_else(|_| serde_json::json!({}));
+            // Parse the MCP schema from either inputSchema or parameters
+            let mcp_schema = if let Some(ref input_schema_json) = tool.input_schema_json {
+                serde_json::from_str::<Value>(input_schema_json)
+                    .unwrap_or_else(|_| serde_json::json!({}))
+            } else {
+                serde_json::from_str::<Value>(&tool.parameters)
+                    .unwrap_or_else(|_| serde_json::json!({}))
+            };
 
-            // Extract required fields from the schema
-            let required = params.get("required")
+            // Transform MCP schema to Anthropic-compatible format
+            let anthropic_schema = self.transform_mcp_to_anthropic_schema(&mcp_schema);
+
+            // Debug: Log the transformed schema
+            println!("Spider: Tool {} transformed schema: {}", tool.name, serde_json::to_string_pretty(&anthropic_schema).unwrap_or_else(|_| "error".to_string()));
+
+            // Extract required fields from the transformed schema
+            let required = anthropic_schema.get("required")
                 .and_then(|r| r.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -1551,8 +1819,10 @@ impl AnthropicProvider {
             SdkTool::new(
                 tool.name.clone(),
                 tool.description.clone(),
-                params.clone(),
+                anthropic_schema["properties"].clone(),
                 required,
+                None,
+                //anthropic_schema.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
             )
         }).collect();
 
@@ -1563,6 +1833,8 @@ impl AnthropicProvider {
             sdk_messages,
             max_tokens,
         ).with_temperature(temperature);
+
+        println!("Tools: {sdk_tools:?}");
 
         // Add tools if any
         if !sdk_tools.is_empty() {

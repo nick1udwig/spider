@@ -14,7 +14,7 @@ anyhow = "1.0"
 base64 = "0.21"
 chrono = { version = "0.4", features = ["serde"] }
 hyperprocess_macro = { git = "https://github.com/hyperware-ai/hyperprocess-macro", rev = "ed99c19" }
-hyperware-anthropic-sdk = { git = "https://github.com/hyperware-ai/hyperware-anthropic-sdk", rev = "6f50ca7" }
+hyperware-anthropic-sdk = { git = "https://github.com/hyperware-ai/hyperware-anthropic-sdk", rev = "155f310" }
 hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", rev = "753dac3", features = ["hyperapp"] }
 process_macros = "0.1"
 rmp-serde = "1.1"

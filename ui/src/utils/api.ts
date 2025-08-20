@@ -9,6 +9,8 @@ import {
   addMcpServer as _addMcpServer,
   listMcpServers as _listMcpServers,
   connectMcpServer as _connectMcpServer,
+  disconnectMcpServer as _disconnectMcpServer,
+  removeMcpServer as _removeMcpServer,
   listConversations as _listConversations,
   getConversation as _getConversation,
   getConfig as _getConfig,
@@ -62,15 +64,11 @@ export async function connectMcpServer(serverId: string) {
 }
 
 export async function disconnectMcpServer(serverId: string) {
-  // TODO: Implement when backend API is available
-  console.warn('disconnectMcpServer not yet implemented in backend');
-  return Promise.resolve('');
+  return _disconnectMcpServer(serverId);
 }
 
 export async function removeMcpServer(serverId: string) {
-  // TODO: Implement when backend API is available
-  console.warn('removeMcpServer not yet implemented in backend');
-  return Promise.resolve('');
+  return _removeMcpServer(serverId);
 }
 
 export async function listConversations(client?: string, limit?: number, offset?: number): Promise<Conversation[]> {

@@ -174,6 +174,7 @@ export default function McpServers() {
                         {server.tools.map((tool, index) => (
                           <li key={index}>
                             <strong>{tool.name}</strong>: {tool.description}
+                            {tool.inputSchemaJson && <span style={{ marginLeft: '8px', color: '#667eea', fontSize: '0.8em' }}>(✓ Schema)</span>}
                           </li>
                         ))}
                       </ul>
