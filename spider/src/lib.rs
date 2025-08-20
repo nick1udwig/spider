@@ -1,5 +1,3 @@
-use std::pin::Pin;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -8,16 +6,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use hyperprocess_macro::*;
-use hyperware_anthropic_sdk::{
-    AnthropicClient, CreateMessageRequest, Message as SdkMessage,
-    Role, Content, ResponseContentBlock, Tool as SdkTool,
-    ToolChoice
-};
 use hyperware_process_lib::{
     our,
     println,
     homepage::add_to_homepage,
-    vfs::{open_dir, open_file, create_drive},
     LazyLoadBlob,
     http::{
         client::{open_ws_connection, send_ws_client_push},
@@ -25,8 +17,14 @@ use hyperware_process_lib::{
     },
 };
 
+mod provider;
+use provider::create_llm_provider;
+
 mod types;
 use types::*;
+
+mod utils;
+use utils::{encrypt_key, decrypt_key, preview_key, save_conversation_to_vfs, load_conversation_from_vfs, discover_mcp_tools};
 
 #[hyperprocess(
     name = "Spider",
@@ -281,7 +279,7 @@ impl SpiderState {
 
     #[http]
     async fn set_api_key(&mut self, request: SetApiKeyRequest) -> Result<String, String> {
-        let encrypted_key = self.encrypt_key(&request.key);
+        let encrypted_key = encrypt_key(&request.key);
 
         let api_key = ApiKey {
             provider: request.provider.clone(),
@@ -303,7 +301,7 @@ impl SpiderState {
                 provider: provider.clone(),
                 created_at: key.created_at,
                 last_used: key.last_used,
-                key_preview: self.preview_key(&key.key),
+                key_preview: preview_key(&key.key),
             }
         }).collect();
 
@@ -493,7 +491,7 @@ impl SpiderState {
             Ok(format!("Connecting to MCP server {} via WebSocket...", server_name))
         } else {
             // For other transport types, use the old method for now
-            let tools = self.discover_mcp_tools(&transport).await?;
+            let tools = discover_mcp_tools(&transport).await?;
             let tool_count = tools.len();
 
             // Update the server with discovered tools
@@ -530,7 +528,7 @@ impl SpiderState {
         }
 
         // Try to load from VFS
-        self.load_conversation_from_vfs(&conversation_id).await
+        load_conversation_from_vfs(&conversation_id).await
     }
 
     #[http]
@@ -590,32 +588,6 @@ impl SpiderState {
 }
 
 impl SpiderState {
-    fn encrypt_key(&self, key: &str) -> String {
-        // For actual encryption, use base64 encoding with a marker
-        // In production, this should use proper encryption with a key derivation function
-        use base64::{Engine as _, engine::general_purpose};
-        format!("encrypted:{}", general_purpose::STANDARD.encode(key.as_bytes()))
-    }
-
-    fn decrypt_key(&self, encrypted_key: &str) -> String {
-        use base64::{Engine as _, engine::general_purpose};
-        if encrypted_key.starts_with("encrypted:") {
-            let encoded = &encrypted_key[10..];
-            String::from_utf8(general_purpose::STANDARD.decode(encoded).unwrap_or_default())
-                .unwrap_or_default()
-        } else {
-            encrypted_key.to_string()
-        }
-    }
-
-    fn preview_key(&self, encrypted_key: &str) -> String {
-        if encrypted_key.len() > 20 {
-            format!("{}...", &encrypted_key[..20])
-        } else {
-            "***".to_string()
-        }
-    }
-
     fn validate_spider_key(&self, key: &str) -> bool {
         self.spider_api_keys.iter().any(|k| k.key == key)
     }
@@ -685,7 +657,7 @@ impl SpiderState {
             .find(|(p, _)| p == &llm_provider)
             .map(|(_, k)| k.key.clone())
             .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?;
-        let api_key = self.decrypt_key(&encrypted_key);
+        let api_key = decrypt_key(&encrypted_key);
 
         // Collect available tools from connected MCP servers
         let available_tools: Vec<Tool> = if let Some(ref mcp_server_ids) = request.mcp_servers {
@@ -843,7 +815,7 @@ impl SpiderState {
         };
 
         // Save to VFS
-        if let Err(e) = self.save_conversation_to_vfs(&conversation).await {
+        if let Err(e) = save_conversation_to_vfs(&conversation).await {
             println!("Warning: Failed to save conversation to VFS: {}", e);
         }
 
@@ -855,72 +827,6 @@ impl SpiderState {
             response,
             all_messages: new_messages,
         })
-    }
-
-    async fn save_conversation_to_vfs(&self, conversation: &Conversation) -> Result<(), String> {
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let filename = format!("{}-{}.json", timestamp, conversation.id);
-
-        // Try to create the conversations directory if it doesn't exist
-        let dir_path = match create_drive(our().package_id(), "conversations", None) {
-            Ok(drive_path) => drive_path,
-            Err(e) => {
-                println!("Warning: Failed to create conversations drive: {:?}", e);
-                // Continue anyway - we'll keep conversations in memory
-                return Ok(());
-            }
-        };
-        let file_path = format!("{dir_path}/{filename}");
-
-        // Serialize the conversation
-        let json_content = serde_json::to_string_pretty(conversation)
-            .map_err(|e| format!("Failed to serialize conversation: {}", e))?;
-
-        // Write to file
-        match open_file(&file_path, true, None) {
-            Ok(file) => {
-                file.write(json_content.as_bytes())
-                    .map_err(|e| format!("Failed to write conversation: {:?}", e))?;
-                println!("Conversation {} saved to VFS at {}", conversation.id, file_path);
-            }
-            Err(e) => {
-                println!("Warning: Failed to save conversation to VFS: {:?}", e);
-                // Continue - conversation is still in memory
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn load_conversation_from_vfs(&self, conversation_id: &str) -> Result<Conversation, String> {
-        let dir_path = format!("{}/conversations", our().node);
-
-        // Open the conversations directory
-        let dir = open_dir(&dir_path, false, None)
-            .map_err(|e| format!("Failed to open conversations directory: {:?}", e))?;
-
-        // List all files in the directory
-        let entries = dir.read()
-            .map_err(|e| format!("Failed to read directory: {:?}", e))?;
-
-        // Look for a file containing the conversation ID
-        for entry in entries {
-            if entry.path.contains(conversation_id) {
-                let file_path = format!("{}/{}", dir_path, entry.path);
-                let file = open_file(&file_path, false, None)
-                    .map_err(|e| format!("Failed to open conversation file: {:?}", e))?;
-
-                let content = file.read()
-                    .map_err(|e| format!("Failed to read conversation file: {:?}", e))?;
-
-                let conversation: Conversation = serde_json::from_slice(&content)
-                    .map_err(|e| format!("Failed to parse conversation: {}", e))?;
-
-                return Ok(conversation);
-            }
-        }
-
-        Err(format!("Conversation {} not found in VFS", conversation_id))
     }
 
     fn handle_mcp_message(&mut self, channel_id: u32, message: Value) {
@@ -1082,47 +988,6 @@ impl SpiderState {
         self.tool_responses.insert(pending.request_id.clone(), result);
     }
 
-    async fn discover_mcp_tools(&self, transport: &TransportConfig) -> Result<Vec<Tool>, String> {
-        // MCP tool discovery implementation
-        match transport.transport_type.as_str() {
-            "stdio" => {
-                // In WASM environment, we can't spawn processes
-                // Return example tools for demonstration
-                // In production, this would use a proxy service or HTTP transport
-                println!("Note: stdio transport not fully supported in WASM environment");
-                println!("Returning example tools for MCP server");
-
-                Ok(vec![
-                    Tool {
-                        name: "search".to_string(),
-                        description: "Search for information".to_string(),
-                        parameters: r#"{"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]}"#.to_string(),
-                        input_schema_json: None,
-                    },
-                    Tool {
-                        name: "calculate".to_string(),
-                        description: "Perform mathematical calculations".to_string(),
-                        parameters: r#"{"type":"object","properties":{"expression":{"type":"string","description":"The mathematical expression to evaluate"}},"required":["expression"]}"#.to_string(),
-                        input_schema_json: None,
-                    },
-                ])
-            }
-            "http" => {
-                // For HTTP transport, we would make HTTP requests to discover tools
-                // This is a placeholder implementation
-                Ok(vec![
-                    Tool {
-                        name: "http_tool".to_string(),
-                        description: "An HTTP-based MCP tool".to_string(),
-                        parameters: r#"{"type":"object","properties":{"query":{"type":"string"}}}"#.to_string(),
-                        input_schema_json: None,
-                    }
-                ])
-            }
-            _ => Err(format!("Unsupported transport type: {}", transport.transport_type))
-        }
-    }
-
     async fn execute_mcp_tool(&mut self, server_id: &str, tool_name: &str, parameters: &Value, conversation_id: Option<String>) -> Result<Value, String> {
         let server = self.mcp_servers.iter()
             .find(|s| s.id == server_id && s.connected)
@@ -1245,381 +1110,5 @@ impl SpiderState {
         }
 
         Ok(results)
-    }
-}
-
-// LLM Provider Abstraction
-trait LlmProvider {
-    fn complete<'a>(&'a self, messages: &'a [Message], tools: &'a [Tool], max_tokens: u32, temperature: f32)
-        -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>>;
-    fn name(&self) -> &str;
-}
-
-struct AnthropicProvider {
-    api_key: String,
-}
-
-impl AnthropicProvider {
-    fn new(api_key: String) -> Self {
-        Self { api_key }
-    }
-}
-
-impl LlmProvider for AnthropicProvider {
-    fn complete<'a>(&'a self, messages: &'a [Message], tools: &'a [Tool], max_tokens: u32, temperature: f32)
-        -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
-        Box::pin(async move {
-            // For simplicity in WASM, skip retry logic for now
-            self.complete_with_retry(messages, tools, max_tokens, temperature).await
-        })
-    }
-
-    fn name(&self) -> &str {
-        "anthropic"
-    }
-}
-
-impl AnthropicProvider {
-    // Transform MCP JSON Schema to Anthropic-compatible format
-    fn transform_mcp_to_anthropic_schema(&self, mcp_schema: &Value) -> Value {
-        // Start with basic structure
-        let mut anthropic_schema = serde_json::json!({
-            "type": "object"
-        });
-
-        if let Some(t) = mcp_schema.get("type") {
-            anthropic_schema["type"] = t.clone();
-        }
-
-        // Handle $defs and resolve references if present
-        let resolved_schema = if mcp_schema.get("$defs").is_some() || mcp_schema.as_object()
-            .map(|o| o.keys().any(|k| k.contains("$ref")))
-            .unwrap_or(false) {
-            self.resolve_schema_refs(mcp_schema, mcp_schema.get("$defs"))
-        } else {
-            mcp_schema.clone()
-        };
-
-        // Extract and clean properties
-        if let Some(properties) = resolved_schema.get("properties") {
-            anthropic_schema["properties"] = self.clean_properties_for_anthropic(properties);
-        }
-
-        // Extract required fields
-        if let Some(required) = resolved_schema.get("required") {
-            anthropic_schema["required"] = required.clone();
-        }
-
-        anthropic_schema
-    }
-
-    // Resolve JSON Schema $ref references
-    fn resolve_schema_refs(&self, schema: &Value, defs: Option<&Value>) -> Value {
-        match schema {
-            Value::Object(map) => {
-                let mut resolved = serde_json::Map::new();
-
-                for (key, value) in map {
-                    if key == "$ref" {
-                        // Resolve the reference
-                        if let Some(ref_path) = value.as_str() {
-                            if let Some(resolved_def) = self.resolve_ref_path(ref_path, defs) {
-                                // Merge the resolved definition into current level
-                                if let Value::Object(def_map) = resolved_def {
-                                    for (def_key, def_value) in def_map {
-                                        if def_key != "$ref" {
-                                            resolved.insert(def_key, self.resolve_schema_refs(&def_value, defs));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else if key != "$defs" && key != "$schema" {
-                        // Recursively resolve nested schemas, skip $defs and $schema
-                        resolved.insert(key.clone(), self.resolve_schema_refs(value, defs));
-                    }
-                }
-
-                Value::Object(resolved)
-            }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(|v| self.resolve_schema_refs(v, defs)).collect())
-            }
-            other => other.clone(),
-        }
-    }
-
-    // Helper to resolve a $ref path
-    fn resolve_ref_path(&self, ref_path: &str, defs: Option<&Value>) -> Option<Value> {
-        // Handle references like "#/$defs/TextOrSearchReplaceBlock"
-        if ref_path.starts_with("#/$defs/") {
-            if let Some(defs) = defs {
-                let def_name = &ref_path[8..]; // Skip "#/$defs/"
-                return defs.get(def_name).cloned();
-            }
-        }
-        None
-    }
-
-    // Clean properties to ensure they match Anthropic's requirements
-    fn clean_properties_for_anthropic(&self, properties: &Value) -> Value {
-        match properties {
-            Value::Object(map) => {
-                let mut cleaned = serde_json::Map::new();
-                for (key, value) in map {
-                    // Ensure property names match Anthropic's pattern
-                    if self.is_valid_anthropic_property_name(key) {
-                        // Recursively clean the property value
-                        cleaned.insert(key.clone(), self.clean_schema_value_for_anthropic(value));
-                    }
-                }
-                Value::Object(cleaned)
-            }
-            other => other.clone(),
-        }
-    }
-
-    // Clean individual schema values
-    fn clean_schema_value_for_anthropic(&self, value: &Value) -> Value {
-        match value {
-            Value::Object(map) => {
-                let mut cleaned = serde_json::Map::new();
-
-                // Check if this object has a default but no type
-                let has_default = map.contains_key("default");
-                let has_type = map.contains_key("type");
-
-                for (key, val) in map {
-                    // Only keep standard JSON Schema properties for Anthropic
-                    if matches!(key.as_str(), "type" | "description" | "properties" |
-                               "required" | "items" | "enum" | "const" |
-                               "minimum" | "maximum" | "minLength" | "maxLength" |
-                               "pattern" | "format") {
-                        cleaned.insert(key.clone(), self.clean_schema_value_for_anthropic(val));
-                    }
-                    // Special handling for default - only include if there's also a type
-                    else if key == "default" && has_type {
-                        cleaned.insert(key.clone(), val.clone());
-                    }
-                }
-
-                // If we have a default but no type, infer the type from the default value
-                if has_default && !has_type {
-                    if let Some(default_val) = map.get("default") {
-                        let inferred_type = match default_val {
-                            Value::String(_) => "string",
-                            Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
-                            Value::Number(_) => "number",
-                            Value::Bool(_) => "boolean",
-                            Value::Array(_) => "array",
-                            Value::Object(_) => "object",
-                            Value::Null => "null",
-                        };
-                        cleaned.insert("type".to_string(), Value::String(inferred_type.to_string()));
-                    }
-                }
-
-                Value::Object(cleaned)
-            }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(|v| self.clean_schema_value_for_anthropic(v)).collect())
-            }
-            other => other.clone(),
-        }
-    }
-
-    // Validate property names against Anthropic's pattern
-    fn is_valid_anthropic_property_name(&self, name: &str) -> bool {
-        // Pattern: ^[a-zA-Z0-9_.-]{1,64}$
-        name.len() <= 64 &&
-        name.len() >= 1 &&
-        name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
-    }
-
-    // Legacy cleaning function - now deprecated in favor of transform_mcp_to_anthropic_schema
-    fn clean_schema_for_anthropic(&self, schema: &Value) -> Value {
-        match schema {
-            Value::Object(map) => {
-                let mut cleaned = serde_json::Map::new();
-                for (key, value) in map {
-                    // Skip non-standard JSON Schema fields that Anthropic doesn't support
-                    if key == "annotations" || key == "readOnlyHint" || key == "openWorldHint" {
-                        continue;
-                    }
-                    // Recursively clean nested values
-                    cleaned.insert(key.clone(), self.clean_schema_for_anthropic(value));
-                }
-                Value::Object(cleaned)
-            }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(|v| self.clean_schema_for_anthropic(v)).collect())
-            }
-            other => other.clone(),
-        }
-    }
-
-    async fn complete_with_retry(&self, messages: &[Message], tools: &[Tool], max_tokens: u32, temperature: f32) -> Result<Message, String> {
-        // Initialize the Anthropic SDK client
-        let client = AnthropicClient::new(&self.api_key);
-
-        // Convert our Message format to SDK Message format
-        let mut sdk_messages = Vec::new();
-
-        for msg in messages {
-            let role = match msg.role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "tool" => Role::User, // Tool results are sent as user messages in Claude API
-                _ => Role::User,
-            };
-
-            // Handle different message types
-            let content = if let Some(tool_results_json) = &msg.tool_results_json {
-                // Parse tool results and format them for the SDK
-                let tool_results: Vec<ToolResult> = serde_json::from_str(tool_results_json)
-                    .unwrap_or_else(|_| Vec::new());
-
-                // Format tool results as text content
-                let mut result_text = String::from("Tool execution results:\n");
-                for result in tool_results {
-                    result_text.push_str(&format!("- Tool call {}: {}\n", result.tool_call_id, result.result));
-                }
-                Content::Text(result_text)
-            } else if let Some(_tool_calls_json) = &msg.tool_calls_json {
-                // For now, include tool calls as text in the message
-                // The SDK will handle tool use blocks separately
-                Content::Text(format!("{}\n[Tool calls pending]", msg.content))
-            } else {
-                Content::Text(msg.content.clone())
-            };
-
-            sdk_messages.push(SdkMessage { role, content });
-        }
-
-        // Convert our Tool format to SDK Tool format
-        let sdk_tools: Vec<SdkTool> = tools.iter().map(|tool| {
-            // Parse the MCP schema from either inputSchema or parameters
-            let mcp_schema = if let Some(ref input_schema_json) = tool.input_schema_json {
-                serde_json::from_str::<Value>(input_schema_json)
-                    .unwrap_or_else(|_| serde_json::json!({}))
-            } else {
-                serde_json::from_str::<Value>(&tool.parameters)
-                    .unwrap_or_else(|_| serde_json::json!({}))
-            };
-
-            // Transform MCP schema to Anthropic-compatible format
-            let anthropic_schema = self.transform_mcp_to_anthropic_schema(&mcp_schema);
-
-            // Debug: Log the transformed schema
-            println!("Spider: Tool {} transformed schema: {}", tool.name, serde_json::to_string_pretty(&anthropic_schema).unwrap_or_else(|_| "error".to_string()));
-
-            // Extract required fields from the transformed schema
-            let required = anthropic_schema.get("required")
-                .and_then(|r| r.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_else(Vec::new);
-
-            SdkTool::new(
-                tool.name.clone(),
-                tool.description.clone(),
-                anthropic_schema["properties"].clone(),
-                required,
-                None,
-                //anthropic_schema.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            )
-        }).collect();
-
-        // Create the request
-        let mut request = CreateMessageRequest::new(
-            //"claude-opus-4-1-20250805",
-            "claude-sonnet-4-20250514",
-            sdk_messages,
-            max_tokens,
-        ).with_temperature(temperature);
-
-        println!("Tools: {sdk_tools:?}");
-
-        // Add tools if any
-        if !sdk_tools.is_empty() {
-            request = request.with_tools(sdk_tools)
-                .with_tool_choice(ToolChoice::Auto {
-                    disable_parallel_tool_use: Some(false)
-                });
-        }
-
-        // Send the message using the SDK
-        let response = client.send_message(request).await
-            .map_err(|e| format!("Failed to send message via SDK: {:?}", e))?;
-
-        // Convert SDK response back to our Message format
-        let mut content_text = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-
-        for block in &response.content {
-            match block {
-                ResponseContentBlock::Text { text, .. } => {
-                    if !content_text.is_empty() {
-                        content_text.push(' ');
-                    }
-                    content_text.push_str(text);
-                }
-                ResponseContentBlock::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall {
-                        id: id.clone(),
-                        tool_name: name.clone(),
-                        parameters: serde_json::to_string(input)
-                            .unwrap_or_else(|_| "{}".to_string()),
-                    });
-                }
-            }
-        }
-
-        Ok(Message {
-            role: "assistant".to_string(),
-            content: content_text,
-            tool_calls_json: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(&tool_calls).unwrap())
-            },
-            tool_results_json: None,
-            timestamp: Utc::now().timestamp() as u64,
-        })
-    }
-}
-
-// Placeholder for future providers
-struct OpenAIProvider {
-    api_key: String,
-}
-
-impl OpenAIProvider {
-    fn new(api_key: String) -> Self {
-        Self { api_key }
-    }
-}
-
-impl LlmProvider for OpenAIProvider {
-    fn complete<'a>(&'a self, _messages: &'a [Message], _tools: &'a [Tool], _max_tokens: u32, _temperature: f32)
-        -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
-        Box::pin(async move {
-            Err("OpenAI provider not yet implemented".to_string())
-        })
-    }
-
-    fn name(&self) -> &str {
-        "openai"
-    }
-}
-
-fn create_llm_provider(provider_type: &str, api_key: &str) -> Box<dyn LlmProvider> {
-    match provider_type {
-        "anthropic" => Box::new(AnthropicProvider::new(api_key.to_string())),
-        "openai" => Box::new(OpenAIProvider::new(api_key.to_string())),
-        _ => Box::new(AnthropicProvider::new(api_key.to_string())), // Default to Anthropic
     }
 }
