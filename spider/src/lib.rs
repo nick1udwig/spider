@@ -255,6 +255,87 @@ struct ProcessResponse {
     data: String,
 }
 
+// JSON-RPC Message Types for MCP Protocol
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Value>,
+    id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct JsonRpcNotification {
+    jsonrpc: String,
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+    id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+}
+
+// MCP Protocol Specific Types
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpInitializeParams {
+    #[serde(rename = "protocolVersion")]
+    protocol_version: String,
+    #[serde(rename = "clientInfo")]
+    client_info: McpClientInfo,
+    capabilities: McpCapabilities,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpClientInfo {
+    name: String,
+    version: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpCapabilities {
+    // Empty for now, can be extended as needed
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpToolCallParams {
+    name: String,
+    arguments: Value,
+}
+
+// Tool execution result types
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ToolExecutionResult {
+    result: Value,
+    success: bool,
+}
+
+// Anthropic schema transformation result
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct AnthropicSchema {
+    #[serde(rename = "type")]
+    schema_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required: Option<Vec<String>>,
+}
+
 // WebSocket Message Types
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -751,19 +832,19 @@ impl SpiderState {
             });
 
             // Send initialize request
-            let init_request = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "clientInfo": {
-                        "name": "spider",
-                        "version": "1.0.0"
+            let init_request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "initialize".to_string(),
+                params: Some(serde_json::to_value(McpInitializeParams {
+                    protocol_version: "2024-11-05".to_string(),
+                    client_info: McpClientInfo {
+                        name: "spider".to_string(),
+                        version: "1.0.0".to_string(),
                     },
-                    "capabilities": {}
-                },
-                "id": format!("init_{}", channel_id)
-            });
+                    capabilities: McpCapabilities {},
+                }).unwrap()),
+                id: format!("init_{}", channel_id),
+            };
 
             // Store pending request
             self.pending_mcp_requests.insert(
@@ -777,7 +858,7 @@ impl SpiderState {
             );
 
             // Send the initialize message
-            let blob = LazyLoadBlob::new(Some("application/json"), init_request.to_string().into_bytes());
+            let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&init_request).unwrap().into_bytes());
             send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
             // Mark server as connecting (will be marked connected when initialized)
@@ -1260,7 +1341,7 @@ impl SpiderState {
     }
 
     fn handle_initialize_response(&mut self, channel_id: u32, conn: &WsConnection, message: &Value) {
-        if let Some(result) = message.get("result") {
+        if let Some(_result) = message.get("result") {
             println!("Spider: MCP server {} initialized successfully", conn.server_name);
 
             // Mark connection as initialized
@@ -1269,11 +1350,12 @@ impl SpiderState {
             }
 
             // Send notifications/initialized
-            let notif = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            });
-            let blob = LazyLoadBlob::new(Some("application/json"), notif.to_string().into_bytes());
+            let notif = JsonRpcNotification {
+                jsonrpc: "2.0".to_string(),
+                method: "notifications/initialized".to_string(),
+                params: None,
+            };
+            let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&notif).unwrap().into_bytes());
             send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
             // Request tools list
@@ -1285,11 +1367,12 @@ impl SpiderState {
 
     fn request_tools_list(&mut self, channel_id: u32) {
         let request_id = format!("tools_{}", channel_id);
-        let tools_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "tools/list",
-            "id": request_id.clone()
-        });
+        let tools_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+            id: request_id.clone(),
+        };
 
         // Store pending request
         if let Some(conn) = self.ws_connections.get(&channel_id) {
@@ -1304,7 +1387,7 @@ impl SpiderState {
             );
         }
 
-        let blob = LazyLoadBlob::new(Some("application/json"), tools_request.to_string().into_bytes());
+        let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&tools_request).unwrap().into_bytes());
         send_ws_client_push(channel_id, WsMessageType::Text, blob);
     }
 
@@ -1438,15 +1521,15 @@ impl SpiderState {
                 // Execute via WebSocket
                 let request_id = format!("tool_{}_{}", channel_id, Uuid::new_v4());
 
-                let tool_request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": parameters
-                    },
-                    "id": request_id.clone()
-                });
+                let tool_request = JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    method: "tools/call".to_string(),
+                    params: Some(serde_json::to_value(McpToolCallParams {
+                        name: tool_name.to_string(),
+                        arguments: parameters.clone(),
+                    }).unwrap()),
+                    id: request_id.clone(),
+                };
 
                 // Store pending request
                 self.pending_mcp_requests.insert(
@@ -1461,7 +1544,7 @@ impl SpiderState {
 
                 // Send the tool call to MCP server
                 println!("Spider: Sending tool call {} to MCP server {} with request_id {}", tool_name, server_id, request_id);
-                let blob = LazyLoadBlob::new(Some("application/json"), tool_request.to_string().into_bytes());
+                let blob = LazyLoadBlob::new(Some("application/json"), serde_json::to_string(&tool_request).unwrap().into_bytes());
                 send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
                 // Wait for response with async polling
@@ -1475,10 +1558,10 @@ impl SpiderState {
 
                         // Parse the MCP result
                         if let Some(content) = response.get("content") {
-                            return Ok(serde_json::json!({
-                                "result": content,
-                                "success": true
-                            }));
+                            return Ok(serde_json::to_value(ToolExecutionResult {
+                                result: content.clone(),
+                                success: true,
+                            }).unwrap());
                         } else {
                             return Ok(response);
                         }
@@ -1498,10 +1581,10 @@ impl SpiderState {
             "http" => {
                 // Execute via HTTP
                 // This is a placeholder - actual implementation would make HTTP requests
-                Ok(serde_json::json!({
-                    "result": format!("HTTP execution of {} with params: {}", tool_name, parameters),
-                    "success": true
-                }))
+                Ok(serde_json::to_value(ToolExecutionResult {
+                    result: serde_json::json!(format!("HTTP execution of {} with params: {}", tool_name, parameters)),
+                    success: true,
+                }).unwrap())
             }
             _ => Err(format!("Unsupported transport type: {}", server.transport.transport_type))
         }
