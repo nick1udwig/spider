@@ -90,7 +90,7 @@ class WebSocketService {
     });
   }
   
-  sendChatMessage(messages: Message[], llmProvider?: string, mcpServers?: string[], metadata?: ConversationMetadata): void {
+  sendChatMessage(messages: Message[], llmProvider?: string, model?: string, mcpServers?: string[], metadata?: ConversationMetadata): void {
     if (!this.isAuthenticated) {
       throw new Error('Not authenticated');
     }
@@ -100,6 +100,7 @@ class WebSocketService {
       payload: {
         messages,
         llmProvider,
+        model,
         mcpServers,
         metadata
       }

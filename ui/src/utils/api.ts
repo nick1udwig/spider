@@ -162,12 +162,13 @@ export async function updateConfig(config: Partial<ConfigResponse>): Promise<str
   });
 }
 
-export async function chat(apiKey: string, messages: Message[], llmProvider?: string, mcpServers?: string[], metadata?: ConversationMetadata, signal?: AbortSignal): Promise<ChatResponse> {
+export async function chat(apiKey: string, messages: Message[], llmProvider?: string, model?: string, mcpServers?: string[], metadata?: ConversationMetadata, signal?: AbortSignal): Promise<ChatResponse> {
   // TODO: Pass signal to the underlying API call when supported
   return _chat({
     apiKey,
     messages,
     llmProvider: llmProvider || null,
+    model: model || null,
     mcpServers: mcpServers || null,
     metadata: metadata || null
   });

@@ -11,6 +11,7 @@ pub(crate) trait LlmProvider {
         &'a self,
         messages: &'a [Message],
         tools: &'a [Tool],
+        model: Option<&'a str>,
         max_tokens: u32,
         temperature: f32,
     ) -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>>;
@@ -33,6 +34,7 @@ impl LlmProvider for OpenAIProvider {
         &'a self,
         _messages: &'a [Message],
         _tools: &'a [Tool],
+        _model: Option<&'a str>,
         _max_tokens: u32,
         _temperature: f32,
     ) -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
@@ -46,8 +48,16 @@ impl LlmProvider for OpenAIProvider {
 
 pub(crate) fn create_llm_provider(provider_type: &str, api_key: &str) -> Box<dyn LlmProvider> {
     match provider_type {
-        "anthropic" => Box::new(AnthropicProvider::new(api_key.to_string())),
+        "anthropic" => {
+            // Check if this is an OAuth token (starts with sk-ant- or ant-)
+            let is_oauth = api_key.starts_with("sk-ant-") || api_key.starts_with("ant-");
+            Box::new(AnthropicProvider::new(api_key.to_string(), is_oauth))
+        }
         "openai" => Box::new(OpenAIProvider::new(api_key.to_string())),
-        _ => Box::new(AnthropicProvider::new(api_key.to_string())), // Default to Anthropic
+        _ => {
+            // Default to Anthropic
+            let is_oauth = api_key.starts_with("sk-ant-") || api_key.starts_with("ant-");
+            Box::new(AnthropicProvider::new(api_key.to_string(), is_oauth))
+        }
     }
 }

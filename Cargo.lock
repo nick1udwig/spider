@@ -1715,7 +1715,7 @@ dependencies = [
 [[package]]
 name = "hyperware-anthropic-sdk"
 version = "0.1.0"
-source = "git+https://github.com/hyperware-ai/hyperware-anthropic-sdk?rev=155f310#155f310c26366a67dba48fff8df3580fada55087"
+source = "git+https://github.com/hyperware-ai/hyperware-anthropic-sdk?rev=363630c#363630c261c4cc8673b92a1f2e835bab8263c866"
 dependencies = [
  "hyperware_process_lib 2.2.0",
  "rand 0.8.5",
@@ -3205,6 +3205,7 @@ dependencies = [
  "base64 0.21.7",
  "caller-utils",
  "chrono",
+ "http",
  "hyperprocess_macro",
  "hyperware-anthropic-sdk",
  "hyperware_process_lib 2.2.0",
@@ -3213,6 +3214,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "url",
  "uuid",
  "wit-bindgen 0.42.1",
 ]

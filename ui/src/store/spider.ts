@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import * as api from '../utils/api';
 import { webSocketService } from '../services/websocket';
 import { WsServerMessage } from '../types/websocket';
+import { AuthAnthropic } from '../auth/anthropic';
 
 interface ApiKeyInfo {
   provider: string;
@@ -45,6 +46,7 @@ interface Conversation {
   messages: Message[];
   metadata: ConversationMetadata;
   llmProvider: string;
+  model?: string;
   mcpServers: string[];
 }
 
@@ -107,6 +109,43 @@ interface SpiderStore {
 // Helper function to fetch admin key using generated binding
 async function fetchAdminKey(): Promise<string> {
   return api.getAdminKey();
+}
+
+// Helper function to get API key for chat (checks OAuth tokens)
+async function getApiKeyForChat(provider: string): Promise<string | null> {
+  // Check if we have an OAuth token for Anthropic
+  if (provider === 'anthropic' || provider === 'anthropic-oauth') {
+    const oauthData = localStorage.getItem('claude_oauth');
+    if (oauthData) {
+      try {
+        const tokens = JSON.parse(oauthData);
+        
+        // Check if token is expired
+        if (tokens.expires && tokens.expires > Date.now()) {
+          return tokens.access;
+        }
+        
+        // Try to refresh the token
+        const refreshed = await AuthAnthropic.refresh(tokens.refresh);
+        
+        // Update stored tokens
+        localStorage.setItem('claude_oauth', JSON.stringify({
+          refresh: refreshed.refresh,
+          access: refreshed.access,
+          expires: refreshed.expires,
+        }));
+        
+        return refreshed.access;
+      } catch (error) {
+        console.error('Failed to refresh OAuth token:', error);
+        // Remove invalid tokens
+        localStorage.removeItem('claude_oauth');
+      }
+    }
+  }
+  
+  // Fall back to admin key
+  return (window as any).__spiderAdminKey || null;
 }
 
 export const useSpiderStore = create<SpiderStore>((set, get) => ({
@@ -323,6 +362,7 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
             fromStt: false,
           },
           llmProvider: get().config.defaultLlmProvider,
+          model: get().config.defaultLlmProvider === 'anthropic' ? 'claude-sonnet-4-20250514' : undefined,
           mcpServers: get().mcpServers.filter(s => s.connected).map(s => s.id),
         };
       }
@@ -346,6 +386,7 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
         webSocketService.sendChatMessage(
           conversation.messages,
           conversation.llmProvider,
+          conversation.model,
           conversation.mcpServers,
           conversation.metadata
         );
@@ -354,9 +395,10 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
       }
       
       // Fallback to HTTP
-      const apiKey = (window as any).__spiderAdminKey;
+      // Get appropriate API key (OAuth or admin)
+      const apiKey = await getApiKeyForChat(conversation.llmProvider);
       if (!apiKey) {
-        throw new Error('Admin key not available. Please refresh the page.');
+        throw new Error('No valid API key available. Please add an API key or login with Claude.');
       }
       
       // Send to backend with abort signal support
@@ -364,6 +406,7 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
         apiKey,
         conversation.messages,
         conversation.llmProvider,
+        conversation.model,
         conversation.mcpServers,
         conversation.metadata,
         signal
@@ -531,13 +574,14 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
         }
       });
       
-      // Authenticate with the Spider API key
-      const adminKey = (window as any).__spiderAdminKey;
-      if (!adminKey) {
-        console.error('Admin key not available for WebSocket auth');
-        throw new Error('Admin key not available. Please refresh the page.');
+      // Authenticate with appropriate API key (OAuth or admin)
+      const provider = get().config.defaultLlmProvider;
+      const authKey = await getApiKeyForChat(provider);
+      if (!authKey) {
+        console.error('No API key available for WebSocket auth');
+        throw new Error('No valid API key available. Please add an API key or login with Claude.');
       }
-      await webSocketService.authenticate(adminKey);
+      await webSocketService.authenticate(authKey);
       
       set({ wsConnected: true });
     } catch (error: any) {

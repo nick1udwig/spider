@@ -14,11 +14,12 @@ use crate::types::{Message, Tool, ToolCall, ToolResult};
 
 pub(crate) struct AnthropicProvider {
     api_key: String,
+    is_oauth: bool,
 }
 
 impl AnthropicProvider {
-    pub(crate) fn new(api_key: String) -> Self {
-        Self { api_key }
+    pub(crate) fn new(api_key: String, is_oauth: bool) -> Self {
+        Self { api_key, is_oauth }
     }
 }
 
@@ -27,12 +28,13 @@ impl LlmProvider for AnthropicProvider {
         &'a self,
         messages: &'a [Message],
         tools: &'a [Tool],
+        model: Option<&'a str>,
         max_tokens: u32,
         temperature: f32,
     ) -> Pin<Box<dyn Future<Output = Result<Message, String>> + 'a>> {
         Box::pin(async move {
             // For simplicity in WASM, skip retry logic for now
-            self.complete_with_retry(messages, tools, max_tokens, temperature)
+            self.complete_with_retry(messages, tools, model, max_tokens, temperature)
                 .await
         })
     }
@@ -228,11 +230,17 @@ impl AnthropicProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
+        model: Option<&str>,
         max_tokens: u32,
         temperature: f32,
     ) -> Result<Message, String> {
         // Initialize the Anthropic SDK client
-        let client = AnthropicClient::new(&self.api_key);
+        let client = if self.is_oauth {
+            // Use the with_oauth() method for OAuth tokens
+            AnthropicClient::new(&self.api_key).with_oauth()
+        } else {
+            AnthropicClient::new(&self.api_key)
+        };
 
         // Convert our Message format to SDK Message format
         let mut sdk_messages = Vec::new();
@@ -317,14 +325,16 @@ impl AnthropicProvider {
             })
             .collect();
 
-        // Create the request
-        let mut request = CreateMessageRequest::new(
-            //"claude-opus-4-1-20250805",
-            "claude-sonnet-4-20250514",
-            sdk_messages,
-            max_tokens,
-        )
-        .with_temperature(temperature);
+        // Create the request with the specified model or default
+        let model_id = model.unwrap_or("claude-sonnet-4-20250514");
+        let mut request = CreateMessageRequest::new(model_id, sdk_messages, max_tokens)
+            .with_temperature(temperature);
+
+        // Add system prompt for OAuth tokens
+        if self.is_oauth {
+            request =
+                request.with_system("You are Claude Code, Anthropic's official CLI for Claude.");
+        }
 
         println!("Tools: {sdk_tools:?}");
 

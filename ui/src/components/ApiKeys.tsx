@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useSpiderStore } from '../store/spider';
+import { ClaudeLogin } from './ClaudeLogin';
 
 export default function ApiKeys() {
   const { apiKeys, isLoading, error, setApiKey, removeApiKey } = useSpiderStore();
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showClaudeLogin, setShowClaudeLogin] = useState(false);
   const [provider, setProvider] = useState('anthropic');
   const [apiKeyValue, setApiKeyValue] = useState('');
 
@@ -20,17 +22,44 @@ export default function ApiKeys() {
     <div className="component-container">
       <div className="component-header">
         <h2>API Keys</h2>
-        <button 
-          className="btn btn-primary"
-          onClick={() => setShowAddForm(!showAddForm)}
-        >
-          {showAddForm ? 'Cancel' : 'Add API Key'}
-        </button>
+        <div className="flex gap-2">
+          <button 
+            className="btn btn-primary"
+            onClick={() => {
+              setShowAddForm(!showAddForm);
+              setShowClaudeLogin(false);
+            }}
+          >
+            {showAddForm ? 'Cancel' : 'Add API Key'}
+          </button>
+          <button 
+            className="btn btn-secondary"
+            onClick={() => {
+              setShowClaudeLogin(!showClaudeLogin);
+              setShowAddForm(false);
+            }}
+          >
+            {showClaudeLogin ? 'Cancel' : 'Login with Claude'}
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="error-message">
           {error}
+        </div>
+      )}
+
+      {showClaudeLogin && (
+        <div className="claude-login-container">
+          <ClaudeLogin 
+            onSuccess={() => {
+              setShowClaudeLogin(false);
+              // Refresh API keys list
+              useSpiderStore.getState().loadApiKeys();
+            }}
+            onCancel={() => setShowClaudeLogin(false)}
+          />
         </div>
       )}
 

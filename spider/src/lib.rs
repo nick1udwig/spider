@@ -25,10 +25,11 @@ use types::{
     DisconnectMcpServerRequest, GetConfigRequest, GetConversationRequest, JsonRpcNotification,
     JsonRpcRequest, ListApiKeysRequest, ListConversationsRequest, ListMcpServersRequest,
     ListSpiderKeysRequest, McpCapabilities, McpClientInfo, McpInitializeParams, McpRequestType,
-    McpServer, McpToolCallParams, Message, PendingMcpRequest, ProcessRequest, ProcessResponse,
-    RemoveApiKeyRequest, RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest,
-    SpiderApiKey, SpiderState, Tool, ToolCall, ToolExecutionResult, ToolResult,
-    UpdateConfigRequest, WsClientMessage, WsConnection, WsServerMessage,
+    McpServer, McpToolCallParams, Message, OAuthExchangeRequest, OAuthRefreshRequest,
+    OAuthTokenResponse, PendingMcpRequest, ProcessRequest, ProcessResponse, RemoveApiKeyRequest,
+    RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest, SpiderApiKey, SpiderState,
+    Tool, ToolCall, ToolExecutionResult, ToolResult, UpdateConfigRequest, WsClientMessage,
+    WsConnection, WsServerMessage,
 };
 
 mod utils;
@@ -255,6 +256,7 @@ impl SpiderState {
                                         api_key: client.api_key,
                                         messages: payload.messages,
                                         llm_provider: payload.llm_provider,
+                                        model: payload.model,
                                         mcp_servers: payload.mcp_servers,
                                         metadata: payload.metadata,
                                     };
@@ -890,10 +892,126 @@ impl SpiderState {
             }),
         }
     }
+
+    // OAuth endpoints - proxy requests to Anthropic to avoid CORS
+    #[http]
+    async fn exchange_oauth_token(
+        &self,
+        req: OAuthExchangeRequest,
+    ) -> Result<OAuthTokenResponse, String> {
+        use hyperware_process_lib::http::client::send_request_await_response;
+        use hyperware_process_lib::http::Method;
+
+        // Parse the code to separate code and state
+        let parts: Vec<&str> = req.code.split('#').collect();
+        let code = parts.get(0).unwrap_or(&"").to_string();
+        let state = parts.get(1).unwrap_or(&"").to_string();
+
+        // Prepare the request body
+        let body = serde_json::json!({
+            "code": code,
+            "state": state,
+            "grant_type": "authorization_code",
+            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+            "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+            "code_verifier": req.verifier
+        });
+
+        // Prepare headers
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        // Make the HTTP request to Anthropic
+        let url = url::Url::parse("https://console.anthropic.com/v1/oauth/token")
+            .map_err(|e| format!("Invalid URL: {}", e))?;
+
+        let body_bytes = body.to_string().into_bytes();
+        let response =
+            send_request_await_response(Method::POST, url, Some(headers), 30000, body_bytes)
+                .await
+                .map_err(|e| format!("HTTP request failed: {:?}", e))?;
+
+        if response.status().is_success() {
+            // Parse the response body
+            match serde_json::from_slice::<serde_json::Value>(response.body()) {
+                Ok(json) => Ok(OAuthTokenResponse {
+                    refresh: json["refresh_token"].as_str().unwrap_or("").to_string(),
+                    access: json["access_token"].as_str().unwrap_or("").to_string(),
+                    expires: chrono::Utc::now().timestamp() as u64
+                        + json["expires_in"].as_u64().unwrap_or(3600),
+                }),
+                Err(e) => Err(format!("Failed to parse OAuth response: {}", e)),
+            }
+        } else {
+            let body_str = String::from_utf8_lossy(response.body());
+            Err(format!(
+                "OAuth exchange failed with status {}: {}",
+                response.status(),
+                body_str
+            ))
+        }
+    }
+
+    #[http]
+    async fn refresh_oauth_token(
+        &self,
+        req: OAuthRefreshRequest,
+    ) -> Result<OAuthTokenResponse, String> {
+        use hyperware_process_lib::http::client::send_request_await_response;
+        use hyperware_process_lib::http::Method;
+
+        // Prepare the request body
+        let body = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": req.refresh_token,
+            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+        });
+
+        // Prepare headers
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        // Make the HTTP request to Anthropic
+        let url = url::Url::parse("https://console.anthropic.com/v1/oauth/token")
+            .map_err(|e| format!("Invalid URL: {}", e))?;
+
+        let body_bytes = body.to_string().into_bytes();
+        let response =
+            send_request_await_response(Method::POST, url, Some(headers), 30000, body_bytes)
+                .await
+                .map_err(|e| format!("HTTP request failed: {:?}", e))?;
+
+        if response.status().is_success() {
+            // Parse the response body
+            match serde_json::from_slice::<serde_json::Value>(response.body()) {
+                Ok(json) => Ok(OAuthTokenResponse {
+                    refresh: json["refresh_token"].as_str().unwrap_or("").to_string(),
+                    access: json["access_token"].as_str().unwrap_or("").to_string(),
+                    expires: chrono::Utc::now().timestamp() as u64
+                        + json["expires_in"].as_u64().unwrap_or(3600),
+                }),
+                Err(e) => Err(format!("Failed to parse OAuth response: {}", e)),
+            }
+        } else {
+            let body_str = String::from_utf8_lossy(response.body());
+            Err(format!(
+                "OAuth refresh failed with status {}: {}",
+                response.status(),
+                body_str
+            ))
+        }
+    }
 }
 
 impl SpiderState {
     fn validate_spider_key(&self, key: &str) -> bool {
+        // Check if it's an OAuth token (starts with specific prefix)
+        if key.starts_with("sk-ant-") || key.starts_with("ant-") {
+            // OAuth tokens are considered valid Spider keys
+            return true;
+        }
+
+        // Check regular Spider API keys
         self.spider_api_keys.iter().any(|k| k.key == key)
     }
 
@@ -904,6 +1022,12 @@ impl SpiderState {
     }
 
     fn validate_permission(&self, key: &str, permission: &str) -> bool {
+        // OAuth tokens have all permissions except admin
+        if key.starts_with("sk-ant-") || key.starts_with("ant-") {
+            return permission != "admin";
+        }
+
+        // Check regular Spider API keys
         self.spider_api_keys
             .iter()
             .any(|k| k.key == key && k.permissions.contains(&permission.to_string()))
@@ -966,20 +1090,13 @@ impl SpiderState {
         // We can't easily call the #[http] method from here, so we'll need to duplicate the logic
         // or restructure the code. For now, let's just process it inline.
 
-        // Validate Spider API key
+        // Validate API key (Spider key or OAuth token)
         if !self.validate_spider_key(&request.api_key) {
-            return Err("Unauthorized: Invalid Spider API key".to_string());
+            return Err("Unauthorized: Invalid API key".to_string());
         }
 
         // Check permissions
-        let spider_key = self
-            .spider_api_keys
-            .iter()
-            .find(|k| k.key == request.api_key)
-            .ok_or("Unauthorized: Invalid Spider API key")?;
-
-        // Require write permission for chat (sending messages to APIs)
-        if !spider_key.permissions.contains(&"write".to_string()) {
+        if !self.validate_permission(&request.api_key, "write") {
             return Err("Forbidden: API key lacks write permission".to_string());
         }
 
@@ -988,19 +1105,76 @@ impl SpiderState {
             .llm_provider
             .unwrap_or(self.default_llm_provider.clone());
 
+        // Determine key name for logging
+        let key_name =
+            if request.api_key.starts_with("sk-ant-") || request.api_key.starts_with("ant-") {
+                "OAuth Token".to_string()
+            } else {
+                self.spider_api_keys
+                    .iter()
+                    .find(|k| k.key == request.api_key)
+                    .map(|k| k.name.clone())
+                    .unwrap_or("Unknown Key".to_string())
+            };
+
         println!(
             "Spider: Starting new conversation {} with provider {} (key: {})",
-            conversation_id, llm_provider, spider_key.name
+            conversation_id, llm_provider, key_name
         );
 
-        // Get the API key for the selected provider and decrypt it
-        let encrypted_key = self
-            .api_keys
-            .iter()
-            .find(|(p, _)| p == &llm_provider)
-            .map(|(_, k)| k.key.clone())
-            .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?;
-        let api_key = decrypt_key(&encrypted_key);
+        // Get the API key for the selected provider
+        let api_key = if request.api_key.starts_with("sk-ant-")
+            || request.api_key.starts_with("ant-")
+        {
+            // OAuth token - use it directly as the API key
+            if llm_provider != "anthropic" && llm_provider != "anthropic-oauth" {
+                return Err(format!(
+                    "OAuth token can only be used with Anthropic provider, not {}",
+                    llm_provider
+                ));
+            }
+            request.api_key.clone()
+        } else {
+            // Regular Spider key - look up the provider's API key
+            // For Anthropic, prefer OAuth token if available
+            if llm_provider == "anthropic" {
+                // First check for anthropic-oauth key (OAuth tokens stored as API keys)
+                if let Some((_, oauth_key)) =
+                    self.api_keys.iter().find(|(p, _)| p == "anthropic-oauth")
+                {
+                    let decrypted = decrypt_key(&oauth_key.key);
+                    // If it's an OAuth token, use it
+                    if decrypted.starts_with("sk-ant-") || decrypted.starts_with("ant-") {
+                        decrypted
+                    } else {
+                        // Fall back to regular anthropic key if exists
+                        self.api_keys
+                            .iter()
+                            .find(|(p, _)| p == "anthropic")
+                            .map(|(_, k)| decrypt_key(&k.key))
+                            .ok_or_else(|| {
+                                format!("No API key found for provider: {}", llm_provider)
+                            })?
+                    }
+                } else {
+                    // No OAuth, try regular anthropic key
+                    self.api_keys
+                        .iter()
+                        .find(|(p, _)| p == "anthropic")
+                        .map(|(_, k)| decrypt_key(&k.key))
+                        .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?
+                }
+            } else {
+                // Non-Anthropic provider, use regular lookup
+                let encrypted_key = self
+                    .api_keys
+                    .iter()
+                    .find(|(p, _)| p == &llm_provider)
+                    .map(|(_, k)| k.key.clone())
+                    .ok_or_else(|| format!("No API key found for provider: {}", llm_provider))?;
+                decrypt_key(&encrypted_key)
+            }
+        };
 
         // Collect available tools from connected MCP servers
         let available_tools: Vec<Tool> = if let Some(ref mcp_server_ids) = request.mcp_servers {
@@ -1058,6 +1232,7 @@ impl SpiderState {
                 .complete(
                     &working_messages,
                     &available_tools,
+                    request.model.as_deref(),
                     self.max_tokens,
                     self.temperature,
                 )

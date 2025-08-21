@@ -281,6 +281,8 @@ pub(crate) struct ChatRequest {
     pub(crate) messages: Vec<Message>,
     #[serde(rename = "llmProvider")]
     pub(crate) llm_provider: Option<String>,
+    #[serde(rename = "model")]
+    pub(crate) model: Option<String>,
     #[serde(rename = "mcpServers")]
     pub(crate) mcp_servers: Option<Vec<String>>,
     pub(crate) metadata: Option<ConversationMetadata>,
@@ -419,6 +421,8 @@ pub(crate) struct WsChatPayload {
     pub(crate) messages: Vec<Message>,
     #[serde(rename = "llmProvider")]
     pub(crate) llm_provider: Option<String>,
+    #[serde(rename = "model")]
+    pub(crate) model: Option<String>,
     #[serde(rename = "mcpServers")]
     pub(crate) mcp_servers: Option<Vec<String>>,
     pub(crate) metadata: Option<ConversationMetadata>,
@@ -451,4 +455,24 @@ pub(crate) enum WsServerMessage {
     Error { error: String },
     #[serde(rename = "pong")]
     Pong,
+}
+
+// OAuth types
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct OAuthExchangeRequest {
+    pub(crate) code: String,
+    pub(crate) verifier: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct OAuthTokenResponse {
+    pub(crate) refresh: String,
+    pub(crate) access: String,
+    pub(crate) expires: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct OAuthRefreshRequest {
+    #[serde(rename = "refreshToken")]
+    pub(crate) refresh_token: String,
 }
