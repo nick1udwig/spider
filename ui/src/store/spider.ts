@@ -104,6 +104,11 @@ interface SpiderStore {
   disconnectWebSocket: () => void;
 }
 
+// Helper function to fetch admin key using generated binding
+async function fetchAdminKey(): Promise<string> {
+  return api.getAdminKey();
+}
+
 export const useSpiderStore = create<SpiderStore>((set, get) => ({
   // Initial state
   apiKeys: [],
@@ -127,6 +132,17 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
   // Actions
   initialize: async () => {
     try {
+      // Fetch admin key if no spider keys are loaded
+      const state = get();
+      if (!state.spiderKeys || state.spiderKeys.length === 0) {
+        try {
+          const adminKey = await fetchAdminKey();
+          // Store the admin key in a variable accessible to API calls
+          (window as any).__spiderAdminKey = adminKey;
+        } catch (error) {
+          console.error('Failed to fetch admin key:', error);
+        }
+      }
       set({ isLoading: true });
       
       // Check if our.js is loaded
@@ -220,6 +236,16 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
 
   loadSpiderKeys: async () => {
     try {
+      // Ensure admin key is fetched first if not already present
+      if (!(window as any).__spiderAdminKey) {
+        try {
+          const adminKey = await fetchAdminKey();
+          (window as any).__spiderAdminKey = adminKey;
+        } catch (error) {
+          console.error('Failed to fetch admin key:', error);
+        }
+      }
+      
       const keys = await api.listSpiderKeys();
       set({ spiderKeys: keys });
     } catch (error: any) {
@@ -328,7 +354,10 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
       }
       
       // Fallback to HTTP
-      const apiKey = 'sp_admin_gui_key';
+      const apiKey = (window as any).__spiderAdminKey;
+      if (!apiKey) {
+        throw new Error('Admin key not available. Please refresh the page.');
+      }
       
       // Send to backend with abort signal support
       const response = await api.chat(
@@ -503,7 +532,12 @@ export const useSpiderStore = create<SpiderStore>((set, get) => ({
       });
       
       // Authenticate with the Spider API key
-      await webSocketService.authenticate('sp_admin_gui_key');
+      const adminKey = (window as any).__spiderAdminKey;
+      if (!adminKey) {
+        console.error('Admin key not available for WebSocket auth');
+        throw new Error('Admin key not available. Please refresh the page.');
+      }
+      await webSocketService.authenticate(adminKey);
       
       set({ wsConnected: true });
     } catch (error: any) {

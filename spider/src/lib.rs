@@ -20,11 +20,13 @@ use provider::create_llm_provider;
 
 mod types;
 use types::{
-    AddMcpServerRequest, ApiKey, ApiKeyInfo, ChatClient, ChatRequest, ChatResponse,
-    ConfigResponse, Conversation, ConversationMetadata, CreateSpiderKeyRequest,
-    JsonRpcNotification, JsonRpcRequest, ListConversationsRequest, McpCapabilities,
-    McpClientInfo, McpInitializeParams, McpRequestType, McpServer, McpToolCallParams,
-    Message, PendingMcpRequest, ProcessRequest, ProcessResponse, SetApiKeyRequest,
+    AddMcpServerRequest, ApiKey, ApiKeyInfo, ChatClient, ChatRequest, ChatResponse, ConfigResponse,
+    ConnectMcpServerRequest, Conversation, ConversationMetadata, CreateSpiderKeyRequest,
+    DisconnectMcpServerRequest, GetConfigRequest, GetConversationRequest, JsonRpcNotification,
+    JsonRpcRequest, ListApiKeysRequest, ListConversationsRequest, ListMcpServersRequest,
+    ListSpiderKeysRequest, McpCapabilities, McpClientInfo, McpInitializeParams, McpRequestType,
+    McpServer, McpToolCallParams, Message, PendingMcpRequest, ProcessRequest, ProcessResponse,
+    RemoveApiKeyRequest, RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest,
     SpiderApiKey, SpiderState, Tool, ToolCall, ToolExecutionResult, ToolResult,
     UpdateConfigRequest, WsClientMessage, WsConnection, WsServerMessage,
 };
@@ -42,6 +44,10 @@ use utils::{
         Binding::Http {
             path: "/api",
             config: HttpBindingConfig::new(false, false, false, None)
+        },
+        Binding::Http {
+            path: "/api-ssd",
+            config: HttpBindingConfig::new(true, false, true, None)
         },
         Binding::Ws {
             path: "/ws",
@@ -64,23 +70,34 @@ impl SpiderState {
         let our_node = our().node.clone();
         println!("Spider MCP client initialized on node: {}", our_node);
 
-        // Create an admin Spider key for the GUI
-        let admin_key = SpiderApiKey {
-            key: "sp_admin_gui_key".to_string(),
-            name: "Admin GUI Key".to_string(),
-            permissions: vec![
-                "chat".to_string(),
-                "read".to_string(),
-                "write".to_string(),
-                "admin".to_string(),
-            ],
-            created_at: Utc::now().timestamp() as u64,
-        };
+        // Create an admin Spider key for the GUI with a random suffix for security
+        // Check if admin key already exists (look for keys with admin permission and the GUI name)
+        let existing_admin_key = self
+            .spider_api_keys
+            .iter()
+            .find(|k| k.name == "Admin GUI Key" && k.permissions.contains(&"admin".to_string()));
 
-        // Check if admin key already exists
-        if !self.spider_api_keys.iter().any(|k| k.key == admin_key.key) {
+        if existing_admin_key.is_none() {
+            // Generate a random suffix using UUID (take first 12 chars for a good balance)
+            let random_suffix = Uuid::new_v4().to_string().replace("-", "");
+            let random_suffix = &random_suffix[..12]; // Take first 12 alphanumeric chars
+
+            let admin_key = SpiderApiKey {
+                key: format!("sp_admin_gui_key_{}", random_suffix),
+                name: "Admin GUI Key".to_string(),
+                permissions: vec![
+                    "chat".to_string(),
+                    "read".to_string(),
+                    "write".to_string(),
+                    "admin".to_string(),
+                ],
+                created_at: Utc::now().timestamp() as u64,
+            };
+
             self.spider_api_keys.push(admin_key.clone());
             println!("Spider: Created admin GUI key: {}", admin_key.key);
+        } else {
+            println!("Spider: Admin GUI key already exists");
         }
 
         // VFS directory creation will be handled when actually saving files
@@ -99,7 +116,24 @@ impl SpiderState {
             let mut success = false;
 
             for attempt in 1..=max_retries {
-                match self.connect_mcp_server(server_id.clone()).await {
+                // Use admin key for auto-reconnect - find the actual admin key
+                let admin_key = self
+                    .spider_api_keys
+                    .iter()
+                    .find(|k| {
+                        k.name == "Admin GUI Key" && k.permissions.contains(&"admin".to_string())
+                    })
+                    .map(|k| k.key.clone())
+                    .unwrap_or_else(|| {
+                        println!("Warning: No admin key found for auto-reconnect");
+                        String::new()
+                    });
+
+                let connect_request = ConnectMcpServerRequest {
+                    server_id: server_id.clone(),
+                    auth_key: admin_key,
+                };
+                match self.connect_mcp_server(connect_request).await {
                     Ok(msg) => {
                         println!("Auto-reconnect successful: {}", msg);
                         success = true;
@@ -369,6 +403,11 @@ impl SpiderState {
 
     #[http]
     async fn set_api_key(&mut self, request: SetApiKeyRequest) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         let encrypted_key = encrypt_key(&request.key);
 
         let api_key = ApiKey {
@@ -385,7 +424,12 @@ impl SpiderState {
     }
 
     #[http]
-    async fn list_api_keys(&self) -> Result<Vec<ApiKeyInfo>, String> {
+    async fn list_api_keys(&self, request: ListApiKeysRequest) -> Result<Vec<ApiKeyInfo>, String> {
+        // Validate read permission
+        if !self.validate_permission(&request.auth_key, "read") {
+            return Err("Unauthorized: API key lacks read permission".to_string());
+        }
+
         let keys: Vec<ApiKeyInfo> = self
             .api_keys
             .iter()
@@ -401,14 +445,19 @@ impl SpiderState {
     }
 
     #[http]
-    async fn remove_api_key(&mut self, provider: String) -> Result<String, String> {
+    async fn remove_api_key(&mut self, request: RemoveApiKeyRequest) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         let initial_len = self.api_keys.len();
-        self.api_keys.retain(|(p, _)| p != &provider);
+        self.api_keys.retain(|(p, _)| p != &request.provider);
 
         if self.api_keys.len() < initial_len {
-            Ok(format!("API key for {} removed", provider))
+            Ok(format!("API key for {} removed", request.provider))
         } else {
-            Err(format!("No API key found for {}", provider))
+            Err(format!("No API key found for {}", request.provider))
         }
     }
 
@@ -417,6 +466,11 @@ impl SpiderState {
         &mut self,
         request: CreateSpiderKeyRequest,
     ) -> Result<SpiderApiKey, String> {
+        // Validate admin key
+        if !self.validate_admin_key(&request.admin_key) {
+            return Err("Unauthorized: Invalid or non-admin Spider API key".to_string());
+        }
+
         let key = format!("sp_{}", Uuid::new_v4().to_string().replace("-", ""));
 
         let spider_key = SpiderApiKey {
@@ -432,24 +486,45 @@ impl SpiderState {
     }
 
     #[http]
-    async fn list_spider_keys(&self) -> Result<Vec<SpiderApiKey>, String> {
+    async fn list_spider_keys(
+        &self,
+        request: ListSpiderKeysRequest,
+    ) -> Result<Vec<SpiderApiKey>, String> {
+        // Validate admin key
+        if !self.validate_admin_key(&request.admin_key) {
+            return Err("Unauthorized: Invalid or non-admin Spider API key".to_string());
+        }
+
         Ok(self.spider_api_keys.clone())
     }
 
     #[http]
-    async fn revoke_spider_key(&mut self, key_id: String) -> Result<String, String> {
+    async fn revoke_spider_key(
+        &mut self,
+        request: RevokeSpiderKeyRequest,
+    ) -> Result<String, String> {
+        // Validate admin key
+        if !self.validate_admin_key(&request.admin_key) {
+            return Err("Unauthorized: Invalid or non-admin Spider API key".to_string());
+        }
+
         let initial_len = self.spider_api_keys.len();
-        self.spider_api_keys.retain(|k| k.key != key_id);
+        self.spider_api_keys.retain(|k| k.key != request.key_id);
 
         if self.spider_api_keys.len() < initial_len {
-            Ok(format!("Spider API key {} revoked", key_id))
+            Ok(format!("Spider API key {} revoked", request.key_id))
         } else {
-            Err(format!("Spider API key {} not found", key_id))
+            Err(format!("Spider API key {} not found", request.key_id))
         }
     }
 
     #[http]
     async fn add_mcp_server(&mut self, request: AddMcpServerRequest) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         let server = McpServer {
             id: Uuid::new_v4().to_string(),
             name: request.name,
@@ -465,19 +540,35 @@ impl SpiderState {
     }
 
     #[http]
-    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, String> {
+    async fn list_mcp_servers(
+        &self,
+        request: ListMcpServersRequest,
+    ) -> Result<Vec<McpServer>, String> {
+        // Validate read permission
+        if !self.validate_permission(&request.auth_key, "read") {
+            return Err("Unauthorized: API key lacks read permission".to_string());
+        }
+
         Ok(self.mcp_servers.clone())
     }
 
     #[http]
-    async fn disconnect_mcp_server(&mut self, server_id: String) -> Result<String, String> {
+    async fn disconnect_mcp_server(
+        &mut self,
+        request: DisconnectMcpServerRequest,
+    ) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         // Find the server
         let server_name = {
             let server = self
                 .mcp_servers
                 .iter_mut()
-                .find(|s| s.id == server_id)
-                .ok_or_else(|| format!("MCP server {} not found", server_id))?;
+                .find(|s| s.id == request.server_id)
+                .ok_or_else(|| format!("MCP server {} not found", request.server_id))?;
             server.connected = false;
             server.name.clone()
         };
@@ -486,7 +577,7 @@ impl SpiderState {
         let channel_to_close = self
             .ws_connections
             .iter()
-            .find(|(_, conn)| conn.server_id == server_id)
+            .find(|(_, conn)| conn.server_id == request.server_id)
             .map(|(id, _)| *id);
 
         if let Some(channel_id) = channel_to_close {
@@ -498,37 +589,57 @@ impl SpiderState {
 
             // Clean up any pending requests for this server
             self.pending_mcp_requests
-                .retain(|_, req| req.server_id != server_id);
+                .retain(|_, req| req.server_id != request.server_id);
         }
 
         Ok(format!("Disconnected from MCP server {}", server_name))
     }
 
     #[http]
-    async fn remove_mcp_server(&mut self, server_id: String) -> Result<String, String> {
+    async fn remove_mcp_server(
+        &mut self,
+        request: RemoveMcpServerRequest,
+    ) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         // First disconnect if connected
-        let _ = self.disconnect_mcp_server(server_id.clone()).await;
+        let disconnect_request = DisconnectMcpServerRequest {
+            server_id: request.server_id.clone(),
+            auth_key: request.auth_key.clone(),
+        };
+        let _ = self.disconnect_mcp_server(disconnect_request).await;
 
         // Remove the server from the list
         let initial_len = self.mcp_servers.len();
-        self.mcp_servers.retain(|s| s.id != server_id);
+        self.mcp_servers.retain(|s| s.id != request.server_id);
 
         if self.mcp_servers.len() < initial_len {
-            Ok(format!("MCP server {} removed", server_id))
+            Ok(format!("MCP server {} removed", request.server_id))
         } else {
-            Err(format!("MCP server {} not found", server_id))
+            Err(format!("MCP server {} not found", request.server_id))
         }
     }
 
     #[http]
-    async fn connect_mcp_server(&mut self, server_id: String) -> Result<String, String> {
+    async fn connect_mcp_server(
+        &mut self,
+        request: ConnectMcpServerRequest,
+    ) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         // Find the server and get its transport config
         let (server_name, transport) = {
             let server = self
                 .mcp_servers
                 .iter()
-                .find(|s| s.id == server_id)
-                .ok_or_else(|| format!("MCP server {} not found", server_id))?;
+                .find(|s| s.id == request.server_id)
+                .ok_or_else(|| format!("MCP server {} not found", request.server_id))?;
             (server.name.clone(), server.transport.clone())
         };
 
@@ -553,7 +664,7 @@ impl SpiderState {
             self.ws_connections.insert(
                 channel_id,
                 WsConnection {
-                    server_id: server_id.clone(),
+                    server_id: request.server_id.clone(),
                     server_name: server_name.clone(),
                     channel_id,
                     tools: Vec::new(),
@@ -585,7 +696,7 @@ impl SpiderState {
                 PendingMcpRequest {
                     request_id: format!("init_{}", channel_id),
                     conversation_id: None,
-                    server_id: server_id.clone(),
+                    server_id: request.server_id.clone(),
                     request_type: McpRequestType::Initialize,
                 },
             );
@@ -598,7 +709,11 @@ impl SpiderState {
             send_ws_client_push(channel_id, WsMessageType::Text, blob);
 
             // Mark server as connecting (will be marked connected when initialized)
-            if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == server_id) {
+            if let Some(server) = self
+                .mcp_servers
+                .iter_mut()
+                .find(|s| s.id == request.server_id)
+            {
                 server.connected = false; // Will be set to true when initialization completes
             }
 
@@ -612,7 +727,11 @@ impl SpiderState {
             let tool_count = tools.len();
 
             // Update the server with discovered tools
-            if let Some(server) = self.mcp_servers.iter_mut().find(|s| s.id == server_id) {
+            if let Some(server) = self
+                .mcp_servers
+                .iter_mut()
+                .find(|s| s.id == request.server_id)
+            {
                 server.tools = tools;
                 server.connected = true;
             }
@@ -629,6 +748,11 @@ impl SpiderState {
         &self,
         request: ListConversationsRequest,
     ) -> Result<Vec<Conversation>, String> {
+        // Validate read permission
+        if !self.validate_permission(&request.auth_key, "read") {
+            return Err("Unauthorized: API key lacks read permission".to_string());
+        }
+
         let conversations: Vec<Conversation> = self
             .active_conversations
             .iter()
@@ -647,20 +771,33 @@ impl SpiderState {
     }
 
     #[http]
-    async fn get_conversation(&self, conversation_id: String) -> Result<Conversation, String> {
+    async fn get_conversation(
+        &self,
+        request: GetConversationRequest,
+    ) -> Result<Conversation, String> {
+        // Validate read permission
+        if !self.validate_permission(&request.auth_key, "read") {
+            return Err("Unauthorized: API key lacks read permission".to_string());
+        }
+
         // First check in-memory conversations
         for (id, conv) in &self.active_conversations {
-            if id == &conversation_id {
+            if id == &request.conversation_id {
                 return Ok(conv.clone());
             }
         }
 
         // Try to load from VFS
-        load_conversation_from_vfs(&conversation_id).await
+        load_conversation_from_vfs(&request.conversation_id).await
     }
 
     #[http]
-    async fn get_config(&self) -> Result<ConfigResponse, String> {
+    async fn get_config(&self, request: GetConfigRequest) -> Result<ConfigResponse, String> {
+        // Validate read permission
+        if !self.validate_permission(&request.auth_key, "read") {
+            return Err("Unauthorized: API key lacks read permission".to_string());
+        }
+
         Ok(ConfigResponse {
             default_llm_provider: self.default_llm_provider.clone(),
             max_tokens: self.max_tokens,
@@ -670,6 +807,11 @@ impl SpiderState {
 
     #[http]
     async fn update_config(&mut self, request: UpdateConfigRequest) -> Result<String, String> {
+        // Validate write permission
+        if !self.validate_permission(&request.auth_key, "write") {
+            return Err("Unauthorized: API key lacks write permission".to_string());
+        }
+
         if let Some(provider) = request.default_llm_provider {
             self.default_llm_provider = provider;
         }
@@ -683,6 +825,16 @@ impl SpiderState {
         }
 
         Ok("Configuration updated".to_string())
+    }
+
+    #[http(method = "GET", path = "/api-ssd")]
+    async fn get_admin_key(&self) -> Result<String, String> {
+        // Return the admin key for the GUI - specifically look for the GUI admin key
+        self.spider_api_keys
+            .iter()
+            .find(|k| k.name == "Admin GUI Key" && k.permissions.contains(&"admin".to_string()))
+            .map(|k| k.key.clone())
+            .ok_or_else(|| "No admin GUI key found".to_string())
     }
 
     #[http]
@@ -719,6 +871,18 @@ impl SpiderState {
 impl SpiderState {
     fn validate_spider_key(&self, key: &str) -> bool {
         self.spider_api_keys.iter().any(|k| k.key == key)
+    }
+
+    fn validate_admin_key(&self, key: &str) -> bool {
+        self.spider_api_keys
+            .iter()
+            .any(|k| k.key == key && k.permissions.contains(&"admin".to_string()))
+    }
+
+    fn validate_permission(&self, key: &str, permission: &str) -> bool {
+        self.spider_api_keys
+            .iter()
+            .any(|k| k.key == key && k.permissions.contains(&permission.to_string()))
     }
 
     // Streaming version of chat for WebSocket clients
@@ -790,8 +954,9 @@ impl SpiderState {
             .find(|k| k.key == request.api_key)
             .ok_or("Unauthorized: Invalid Spider API key")?;
 
-        if !spider_key.permissions.contains(&"chat".to_string()) {
-            return Err("Forbidden: API key lacks chat permission".to_string());
+        // Require write permission for chat (sending messages to APIs)
+        if !spider_key.permissions.contains(&"write".to_string()) {
+            return Err("Forbidden: API key lacks write permission".to_string());
         }
 
         let conversation_id = Uuid::new_v4().to_string();

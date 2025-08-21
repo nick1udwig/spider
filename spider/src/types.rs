@@ -163,18 +163,95 @@ pub(crate) struct ToolResult {
 pub(crate) struct SetApiKeyRequest {
     pub(crate) provider: String,
     pub(crate) key: String,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub(crate) struct CreateSpiderKeyRequest {
     pub(crate) name: String,
     pub(crate) permissions: Vec<String>,
+    #[serde(rename = "adminKey")]
+    pub(crate) admin_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct ListSpiderKeysRequest {
+    #[serde(rename = "adminKey")]
+    pub(crate) admin_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct RevokeSpiderKeyRequest {
+    #[serde(rename = "keyId")]
+    pub(crate) key_id: String,
+    #[serde(rename = "adminKey")]
+    pub(crate) admin_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct ListApiKeysRequest {
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct RemoveApiKeyRequest {
+    pub(crate) provider: String,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct ConnectMcpServerRequest {
+    #[serde(rename = "serverId")]
+    pub(crate) server_id: String,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct DisconnectMcpServerRequest {
+    #[serde(rename = "serverId")]
+    pub(crate) server_id: String,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct RemoveMcpServerRequest {
+    #[serde(rename = "serverId")]
+    pub(crate) server_id: String,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct ListMcpServersRequest {
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct GetConversationRequest {
+    #[serde(rename = "conversationId")]
+    pub(crate) conversation_id: String,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(crate) struct GetConfigRequest {
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub(crate) struct AddMcpServerRequest {
     pub(crate) name: String,
     pub(crate) transport: TransportConfig,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -182,6 +259,8 @@ pub(crate) struct ListConversationsRequest {
     pub(crate) limit: Option<u32>,
     pub(crate) offset: Option<u32>,
     pub(crate) client: Option<String>,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -191,6 +270,8 @@ pub(crate) struct UpdateConfigRequest {
     #[serde(rename = "maxTokens")]
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
+    #[serde(rename = "authKey")]
+    pub(crate) auth_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

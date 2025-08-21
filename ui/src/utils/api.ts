@@ -16,6 +16,7 @@ import {
   getConfig as _getConfig,
   updateConfig as _updateConfig,
   chat as _chat,
+  getAdminKey as _getAdminKey,
   type ApiKeyInfo,
   type SpiderApiKey,
   type McpServer,
@@ -27,71 +28,137 @@ import {
   type TransportConfig,
 } from '@caller-utils';
 
+export async function getAdminKey(): Promise<string> {
+  return _getAdminKey();
+}
+
 export async function setApiKey(provider: string, key: string) {
-  return _setApiKey({ provider, key });
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _setApiKey({ provider, key, authKey });
 }
 
 export async function listApiKeys(): Promise<ApiKeyInfo[]> {
-  return _listApiKeys();
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _listApiKeys({ authKey });
 }
 
 export async function removeApiKey(provider: string) {
-  return _removeApiKey(provider);
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _removeApiKey({ provider, authKey });
 }
 
 export async function createSpiderKey(name: string, permissions: string[]): Promise<SpiderApiKey> {
-  return _createSpiderKey({ name, permissions });
+  const adminKey = (window as any).__spiderAdminKey;
+  if (!adminKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _createSpiderKey({ name, permissions, adminKey });
 }
 
 export async function listSpiderKeys(): Promise<SpiderApiKey[]> {
-  return _listSpiderKeys();
+  const adminKey = (window as any).__spiderAdminKey;
+  if (!adminKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _listSpiderKeys({ adminKey });
 }
 
 export async function revokeSpiderKey(key: string) {
-  return _revokeSpiderKey(key);
+  const adminKey = (window as any).__spiderAdminKey;
+  if (!adminKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _revokeSpiderKey({ keyId: key, adminKey });
 }
 
 export async function addMcpServer(name: string, transport: TransportConfig): Promise<string> {
-  return _addMcpServer({ name, transport });
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _addMcpServer({ name, transport, authKey });
 }
 
 export async function listMcpServers(): Promise<McpServer[]> {
-  return _listMcpServers();
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _listMcpServers({ authKey });
 }
 
 export async function connectMcpServer(serverId: string) {
-  return _connectMcpServer(serverId);
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _connectMcpServer({ serverId, authKey });
 }
 
 export async function disconnectMcpServer(serverId: string) {
-  return _disconnectMcpServer(serverId);
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _disconnectMcpServer({ serverId, authKey });
 }
 
 export async function removeMcpServer(serverId: string) {
-  return _removeMcpServer(serverId);
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _removeMcpServer({ serverId, authKey });
 }
 
 export async function listConversations(client?: string, limit?: number, offset?: number): Promise<Conversation[]> {
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
   return _listConversations({
     client: client || null,
     limit: limit || null,
-    offset: offset || null
+    offset: offset || null,
+    authKey
   });
 }
 
 export async function getConversation(conversationId: string): Promise<Conversation> {
-  return _getConversation(conversationId);
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _getConversation({ conversationId, authKey });
 }
 
 export async function getConfig(): Promise<ConfigResponse> {
-  return _getConfig();
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
+  return _getConfig({ authKey });
 }
 
 export async function updateConfig(config: Partial<ConfigResponse>): Promise<string> {
+  const authKey = (window as any).__spiderAdminKey;
+  if (!authKey) {
+    throw new Error('Admin key not available. Please refresh the page.');
+  }
   return _updateConfig({
     defaultLlmProvider: config.defaultLlmProvider || null,
     maxTokens: config.maxTokens || null,
-    temperature: config.temperature || null
+    temperature: config.temperature || null,
+    authKey
   });
 }
 
