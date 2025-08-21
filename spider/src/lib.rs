@@ -185,7 +185,10 @@ impl SpiderState {
                     Ok(msg) => {
                         match msg {
                             WsClientMessage::Auth { api_key } => {
-                                if self.validate_spider_key(&api_key) {
+                                // Validate API key exists and has write permission (required for chat)
+                                if self.validate_spider_key(&api_key)
+                                    && self.validate_permission(&api_key, "write")
+                                {
                                     self.chat_clients.insert(
                                         channel_id,
                                         ChatClient {
@@ -208,9 +211,14 @@ impl SpiderState {
                                     );
                                 } else {
                                     // Send auth failure and close connection
-                                    let response = WsServerMessage::AuthError {
-                                        error: "Invalid API key".to_string(),
+                                    let error_msg = if !self.validate_spider_key(&api_key) {
+                                        "Invalid API key".to_string()
+                                    } else {
+                                        "API key lacks write permission required for chat"
+                                            .to_string()
                                     };
+
+                                    let response = WsServerMessage::AuthError { error: error_msg };
                                     let json = serde_json::to_string(&response).unwrap();
                                     send_ws_push(
                                         channel_id,
@@ -226,6 +234,22 @@ impl SpiderState {
                             }
                             WsClientMessage::Chat { payload } => {
                                 if let Some(client) = self.chat_clients.get(&channel_id).cloned() {
+                                    // Double-check permissions (defense in depth)
+                                    if !self.validate_permission(&client.api_key, "write") {
+                                        let response = WsServerMessage::Error {
+                                            error:
+                                                "API key lacks write permission required for chat"
+                                                    .to_string(),
+                                        };
+                                        let json = serde_json::to_string(&response).unwrap();
+                                        send_ws_push(
+                                            channel_id,
+                                            WsMessageType::Text,
+                                            LazyLoadBlob::new(Some("application/json"), json),
+                                        );
+                                        return;
+                                    }
+
                                     // Convert WsChatPayload to ChatRequest
                                     let chat_request = ChatRequest {
                                         api_key: client.api_key,
