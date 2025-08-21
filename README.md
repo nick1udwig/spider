@@ -8,4 +8,4 @@ Spider is the central orchestrator for the web of LLM-powered applications on Hy
 
 [Read the roadmap here](https://gist.github.com/nick1udwig/117f9fc5bfd134f987183dd7c67343b4)
 
-[Read about the non-technical vision here](https://gist.github.com/nick1udwig/147827a2d7d4f432ed186f6b2085a939)
+[Read a non-technical discussion of the vision here](https://gist.github.com/nick1udwig/147827a2d7d4f432ed186f6b2085a939)
