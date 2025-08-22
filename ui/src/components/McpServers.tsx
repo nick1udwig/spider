@@ -14,7 +14,12 @@ export default function McpServers() {
   } = useSpiderStore();
   const [showAddForm, setShowAddForm] = useState(false);
   const [serverName, setServerName] = useState('');
+  const [transportType, setTransportType] = useState('websocket');
   const [url, setUrl] = useState('ws://localhost:10125');
+  const [hypergridUrl, setHypergridUrl] = useState('http://localhost:8080/operator:hypergrid:ware.hypr/shim/mcp');
+  const [hypergridToken, setHypergridToken] = useState('');
+  const [hypergridClientId, setHypergridClientId] = useState('');
+  const [hypergridNode, setHypergridNode] = useState('');
   const [connectingServers, setConnectingServers] = useState<Set<string>>(new Set());
 
   // Periodically refresh server status
@@ -29,16 +34,33 @@ export default function McpServers() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    const transport = {
-      transportType: 'websocket',
+    let transport: any = {
+      transportType: transportType,
       command: null,
       args: null,
-      url: url
+      url: null,
+      hypergridToken: null,
+      hypergridClientId: null,
+      hypergridNode: null
     };
+    
+    if (transportType === 'websocket') {
+      transport.url = url;
+    } else if (transportType === 'hypergrid') {
+      transport.url = hypergridUrl;
+      transport.hypergridToken = hypergridToken;
+      transport.hypergridClientId = hypergridClientId;
+      transport.hypergridNode = hypergridNode;
+    }
     
     await addMcpServer(serverName, transport);
     setServerName('');
+    setTransportType('websocket');
     setUrl('ws://localhost:10125');
+    setHypergridUrl('http://localhost:8080/operator:hypergrid:ware.hypr/shim/mcp');
+    setHypergridToken('');
+    setHypergridClientId('');
+    setHypergridNode('');
     setShowAddForm(false);
     
     // Refresh servers list after adding
@@ -121,23 +143,96 @@ export default function McpServers() {
           
           <div className="form-group">
             <label htmlFor="transport-type">Transport Type</label>
-            <div className="transport-info">WebSocket</div>
+            <select
+              id="transport-type"
+              value={transportType}
+              onChange={(e) => setTransportType(e.target.value)}
+              className="form-select"
+            >
+              <option value="websocket">WebSocket</option>
+              <option value="hypergrid">Hypergrid</option>
+            </select>
           </div>
           
-          <div className="form-group">
-            <label htmlFor="url">WebSocket URL</label>
-            <input
-              id="url"
-              type="text"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="ws://localhost:10125"
-              required
-            />
-            <small className="form-help">
-              URL of the WebSocket MCP server or ws-mcp wrapper
-            </small>
-          </div>
+          {transportType === 'websocket' && (
+            <div className="form-group">
+              <label htmlFor="url">WebSocket URL</label>
+              <input
+                id="url"
+                type="text"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="ws://localhost:10125"
+                required
+              />
+              <small className="form-help">
+                URL of the WebSocket MCP server or ws-mcp wrapper
+              </small>
+            </div>
+          )}
+          
+          {transportType === 'hypergrid' && (
+            <>
+              <div className="form-group">
+                <label htmlFor="hypergrid-url">Hypergrid API URL</label>
+                <input
+                  id="hypergrid-url"
+                  type="text"
+                  value={hypergridUrl}
+                  onChange={(e) => setHypergridUrl(e.target.value)}
+                  placeholder="http://localhost:8080/operator:hypergrid:ware.hypr/shim/mcp"
+                  required
+                />
+                <small className="form-help">
+                  Base URL for the Hypergrid API endpoint
+                </small>
+              </div>
+              
+              <div className="form-group">
+                <label htmlFor="hypergrid-token">Authentication Token</label>
+                <input
+                  id="hypergrid-token"
+                  type="text"
+                  value={hypergridToken}
+                  onChange={(e) => setHypergridToken(e.target.value)}
+                  placeholder="Enter your hypergrid token (optional for initial connection)"
+                />
+                <small className="form-help">
+                  Token for authenticating with the Hypergrid network
+                </small>
+              </div>
+              
+              <div className="form-group">
+                <label htmlFor="hypergrid-client-id">Client ID</label>
+                <input
+                  id="hypergrid-client-id"
+                  type="text"
+                  value={hypergridClientId}
+                  onChange={(e) => setHypergridClientId(e.target.value)}
+                  placeholder="Enter your client ID"
+                  required
+                />
+                <small className="form-help">
+                  Unique identifier for this client
+                </small>
+              </div>
+              
+              <div className="form-group">
+                <label htmlFor="hypergrid-node">Node Name</label>
+                <input
+                  id="hypergrid-node"
+                  type="text"
+                  value={hypergridNode}
+                  onChange={(e) => setHypergridNode(e.target.value)}
+                  placeholder="Enter your Hyperware node name"
+                  required
+                />
+                <small className="form-help">
+                  Name of your Hyperware node
+                </small>
+              </div>
+            </>
+          )}
           
           <button type="submit" className="btn btn-primary" disabled={isLoading}>
             {isLoading ? 'Adding...' : 'Add Server'}
@@ -164,7 +259,10 @@ export default function McpServers() {
                     }
                   </p>
                   <p>
-                    Transport: WebSocket - {server.transport.url || 'No URL specified'}
+                    Transport: {server.transport.transportType === 'hypergrid' ? 
+                      `Hypergrid - ${server.transport.hypergridNode || 'Not configured'}` :
+                      `WebSocket - ${server.transport.url || 'No URL specified'}`
+                    }
                   </p>
                   <p>Tools: {server.tools.length}</p>
                   {server.tools.length > 0 && (

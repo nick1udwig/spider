@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -22,11 +23,12 @@ mod types;
 use types::{
     AddMcpServerRequest, ApiKey, ApiKeyInfo, ChatClient, ChatRequest, ChatResponse, ConfigResponse,
     ConnectMcpServerRequest, Conversation, ConversationMetadata, CreateSpiderKeyRequest,
-    DisconnectMcpServerRequest, GetConfigRequest, GetConversationRequest, JsonRpcNotification,
-    JsonRpcRequest, ListApiKeysRequest, ListConversationsRequest, ListMcpServersRequest,
-    ListSpiderKeysRequest, McpCapabilities, McpClientInfo, McpInitializeParams, McpRequestType,
-    McpServer, McpToolCallParams, Message, OAuthExchangeRequest, OAuthRefreshRequest,
-    OAuthTokenResponse, PendingMcpRequest, ProcessRequest, ProcessResponse, RemoveApiKeyRequest,
+    DisconnectMcpServerRequest, GetConfigRequest, GetConversationRequest, HypergridConnection,
+    HypergridMessage, HypergridMessageType, JsonRpcNotification, JsonRpcRequest,
+    ListApiKeysRequest, ListConversationsRequest, ListMcpServersRequest, ListSpiderKeysRequest,
+    McpCapabilities, McpClientInfo, McpInitializeParams, McpRequestType, McpServer,
+    McpToolCallParams, Message, OAuthExchangeRequest, OAuthRefreshRequest, OAuthTokenResponse,
+    PendingMcpRequest, ProcessRequest, ProcessResponse, RemoveApiKeyRequest,
     RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest, SpiderApiKey, SpiderState,
     Tool, ToolCall, ToolExecutionResult, ToolResult, UpdateConfigRequest, WsClientMessage,
     WsConnection, WsServerMessage,
@@ -70,6 +72,45 @@ impl SpiderState {
 
         let our_node = our().node.clone();
         println!("Spider MCP client initialized on node: {}", our_node);
+        
+        // Always create the hypergrid MCP server
+        let hypergrid_server = McpServer {
+            id: "hypergrid_default".to_string(),
+            name: "Hypergrid".to_string(),
+            transport: types::TransportConfig {
+                transport_type: "hypergrid".to_string(),
+                command: None,
+                args: None,
+                url: Some("http://localhost:8080/operator:hypergrid:ware.hypr/shim/mcp".to_string()),
+                hypergrid_token: None,
+                hypergrid_client_id: None,
+                hypergrid_node: None,
+            },
+            tools: vec![
+                Tool {
+                    name: "hypergrid_authorize".to_string(),
+                    description: "Configure Hypergrid connection credentials. Use this when you receive hypergrid auth strings.".to_string(),
+                    parameters: r#"{"type":"object","properties":{"url":{"type":"string"},"token":{"type":"string"},"client_id":{"type":"string"},"node":{"type":"string"}},"required":["url","token","client_id","node"]}"#.to_string(),
+                    input_schema_json: Some(r#"{"type":"object","properties":{"url":{"type":"string","description":"The base URL for the Hypergrid API"},"token":{"type":"string","description":"The authentication token"},"client_id":{"type":"string","description":"The unique client ID"},"node":{"type":"string","description":"The Hyperware node name"}},"required":["url","token","client_id","node"]}"#.to_string()),
+                },
+                Tool {
+                    name: "hypergrid_search".to_string(),
+                    description: "Search the Hypergrid provider registry for available data providers.".to_string(),
+                    parameters: r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#.to_string(),
+                    input_schema_json: Some(r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query for providers"}},"required":["query"]}"#.to_string()),
+                },
+                Tool {
+                    name: "hypergrid_call".to_string(),
+                    description: "Call a Hypergrid provider with arguments to retrieve data.".to_string(),
+                    parameters: r#"{"type":"object","properties":{"providerId":{"type":"string"},"providerName":{"type":"string"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}}}},"required":["providerId","providerName","callArgs"]}"#.to_string(),
+                    input_schema_json: Some(r#"{"type":"object","properties":{"providerId":{"type":"string","description":"The provider ID"},"providerName":{"type":"string","description":"The provider name"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"Arguments as array of [key, value] pairs"}},"required":["providerId","providerName","callArgs"]}"#.to_string()),
+                },
+            ],
+            connected: true, // Always mark as connected
+        };
+        
+        self.mcp_servers.push(hypergrid_server);
+        println!("Spider: Hypergrid MCP server initialized (unconfigured)");
 
         // Create an admin Spider key for the GUI with a random suffix for security
         // Check if admin key already exists (look for keys with admin permission and the GUI name)
@@ -164,6 +205,8 @@ impl SpiderState {
                 );
             }
         }
+
+        println!("Spider initialization complete");
     }
 
     #[ws]
@@ -746,6 +789,85 @@ impl SpiderState {
             Ok(format!(
                 "Connecting to MCP server {} via WebSocket...",
                 server_name
+            ))
+        } else if transport.transport_type == "hypergrid" {
+            // Handle hypergrid connection
+            let url = transport
+                .url
+                .clone()
+                .ok_or_else(|| "Hypergrid requires a URL".to_string())?;
+            let token = transport
+                .hypergrid_token
+                .clone()
+                .ok_or_else(|| "Hypergrid requires a token".to_string())?;
+            let client_id = transport
+                .hypergrid_client_id
+                .clone()
+                .ok_or_else(|| "Hypergrid requires a client_id".to_string())?;
+            let node = transport
+                .hypergrid_node
+                .clone()
+                .ok_or_else(|| "Hypergrid requires a node name".to_string())?;
+
+            // Test the connection first
+            let _test_response = self
+                .test_hypergrid_connection(&url, &token, &client_id)
+                .await?;
+
+            // Create the hypergrid connection
+            let hypergrid_conn = HypergridConnection {
+                server_id: request.server_id.clone(),
+                url: url.clone(),
+                token: token.clone(),
+                client_id: client_id.clone(),
+                node: node.clone(),
+                last_retry: Instant::now(),
+                retry_count: 0,
+                connected: true,
+            };
+
+            // Store the client_id for the format string before moving hypergrid_conn
+            let conn_client_id = hypergrid_conn.client_id.clone();
+
+            // Store the connection
+            self.hypergrid_connections
+                .insert(request.server_id.clone(), hypergrid_conn);
+
+            // Define the hypergrid tools
+            let hypergrid_tools = vec![
+                Tool {
+                    name: "authorize".to_string(),
+                    description: "Configure the hypergrid connection credentials".to_string(),
+                    parameters: r#"{"type":"object","properties":{"url":{"type":"string"},"token":{"type":"string"},"client_id":{"type":"string"},"node":{"type":"string"}},"required":["url","token","client_id","node"]}"#.to_string(),
+                    input_schema_json: Some(r#"{"type":"object","properties":{"url":{"type":"string","description":"The base URL for the Hypergrid API"},"token":{"type":"string","description":"The authentication token"},"client_id":{"type":"string","description":"The unique client ID"},"node":{"type":"string","description":"The Hyperware node name"}},"required":["url","token","client_id","node"]}"#.to_string()),
+                },
+                Tool {
+                    name: "search-registry".to_string(),
+                    description: "Search through hypergrid provider registry".to_string(),
+                    parameters: r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#.to_string(),
+                    input_schema_json: Some(r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query for providers"}},"required":["query"]}"#.to_string()),
+                },
+                Tool {
+                    name: "call-provider".to_string(),
+                    description: "Call a hypergrid provider with arguments".to_string(),
+                    parameters: r#"{"type":"object","properties":{"providerId":{"type":"string"},"providerName":{"type":"string"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}}}},"required":["providerId","providerName","callArgs"]}"#.to_string(),
+                    input_schema_json: Some(r#"{"type":"object","properties":{"providerId":{"type":"string","description":"The provider ID"},"providerName":{"type":"string","description":"The provider name"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"Arguments as array of [key, value] pairs"}},"required":["providerId","providerName","callArgs"]}"#.to_string()),
+                },
+            ];
+
+            // Update the server with hypergrid tools and mark as connected
+            if let Some(server) = self
+                .mcp_servers
+                .iter_mut()
+                .find(|s| s.id == request.server_id)
+            {
+                server.tools = hypergrid_tools;
+                server.connected = true;
+            }
+
+            Ok(format!(
+                "Connected to Hypergrid MCP server {} (Node: {}, Client ID: {})",
+                server_name, node, conn_client_id
             ))
         } else {
             // For other transport types, use the old method for now
@@ -1593,6 +1715,7 @@ impl SpiderState {
             .insert(pending.request_id.clone(), result);
     }
 
+
     async fn execute_mcp_tool(
         &mut self,
         server_id: &str,
@@ -1613,17 +1736,161 @@ impl SpiderState {
             .find(|t| t.name == tool_name)
             .ok_or_else(|| format!("Tool {} not found on server {}", tool_name, server_id))?;
 
-        // Find the WebSocket connection for this server
-        let channel_id = self
-            .ws_connections
-            .iter()
-            .find(|(_, conn)| conn.server_id == server_id)
-            .map(|(id, _)| *id)
-            .ok_or_else(|| format!("No WebSocket connection found for server {}", server_id))?;
-
         // Execute the tool based on transport type
         match server.transport.transport_type.as_str() {
+            "hypergrid" => {
+                // Handle the different hypergrid tools
+                match tool_name {
+                    "hypergrid_authorize" => {
+                        // Update hypergrid credentials
+                        let new_url = parameters
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing url parameter".to_string())?;
+                        let new_token = parameters
+                            .get("token")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing token parameter".to_string())?;
+                        let new_client_id = parameters
+                            .get("client_id")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing client_id parameter".to_string())?;
+                        let new_node = parameters
+                            .get("node")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing node parameter".to_string())?;
+
+                        // Test new connection
+                        self.test_hypergrid_connection(new_url, new_token, new_client_id)
+                            .await?;
+
+                        // Create or update the hypergrid connection
+                        let hypergrid_conn = HypergridConnection {
+                            server_id: server_id.to_string(),
+                            url: new_url.to_string(),
+                            token: new_token.to_string(),
+                            client_id: new_client_id.to_string(),
+                            node: new_node.to_string(),
+                            last_retry: Instant::now(),
+                            retry_count: 0,
+                            connected: true,
+                        };
+                        
+                        self.hypergrid_connections.insert(server_id.to_string(), hypergrid_conn);
+
+                        // Update transport config
+                        if let Some(server) =
+                            self.mcp_servers.iter_mut().find(|s| s.id == server_id)
+                        {
+                            server.transport.url = Some(new_url.to_string());
+                            server.transport.hypergrid_token = Some(new_token.to_string());
+                            server.transport.hypergrid_client_id = Some(new_client_id.to_string());
+                            server.transport.hypergrid_node = Some(new_node.to_string());
+                        }
+
+                        Ok(serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("✅ Successfully authorized! Hypergrid is now configured with:\n- Node: {}\n- Client ID: {}\n- URL: {}", new_node, new_client_id, new_url)
+                            }]
+                        }))
+                    }
+                    "hypergrid_search" => {
+                        // Check if configured
+                        let hypergrid_conn = self.hypergrid_connections.get(server_id)
+                            .ok_or_else(|| "Hypergrid not configured. Please use hypergrid_authorize first with your credentials.".to_string())?;
+                        let query = parameters
+                            .get("query")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing query parameter".to_string())?;
+
+                        let response = self
+                            .call_hypergrid_api(
+                                &hypergrid_conn.url,
+                                &hypergrid_conn.token,
+                                &hypergrid_conn.client_id,
+                                &HypergridMessage {
+                                    request: HypergridMessageType::SearchRegistry(
+                                        query.to_string(),
+                                    ),
+                                },
+                            )
+                            .await?;
+
+                        Ok(serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": response
+                            }]
+                        }))
+                    }
+                    "hypergrid_call" => {
+                        // Check if configured
+                        let hypergrid_conn = self.hypergrid_connections.get(server_id)
+                            .ok_or_else(|| "Hypergrid not configured. Please use hypergrid_authorize first with your credentials.".to_string())?;
+                        let provider_id = parameters
+                            .get("providerId")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing providerId parameter".to_string())?;
+                        let provider_name = parameters
+                            .get("providerName")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing providerName parameter".to_string())?;
+                        let call_args = parameters
+                            .get("callArgs")
+                            .and_then(|v| v.as_array())
+                            .ok_or_else(|| "Missing callArgs parameter".to_string())?;
+
+                        // Convert callArgs to Vec<(String, String)>
+                        let mut arguments = Vec::new();
+                        for arg in call_args {
+                            if let Some(pair) = arg.as_array() {
+                                if pair.len() == 2 {
+                                    if let (Some(key), Some(val)) =
+                                        (pair[0].as_str(), pair[1].as_str())
+                                    {
+                                        arguments.push((key.to_string(), val.to_string()));
+                                    }
+                                }
+                            }
+                        }
+
+                        let response = self
+                            .call_hypergrid_api(
+                                &hypergrid_conn.url,
+                                &hypergrid_conn.token,
+                                &hypergrid_conn.client_id,
+                                &HypergridMessage {
+                                    request: HypergridMessageType::CallProvider {
+                                        provider_id: provider_id.to_string(),
+                                        provider_name: provider_name.to_string(),
+                                        arguments,
+                                    },
+                                },
+                            )
+                            .await?;
+
+                        Ok(serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": response
+                            }]
+                        }))
+                    }
+                    _ => Err(format!("Unknown hypergrid tool: {}", tool_name)),
+                }
+            }
             "stdio" | "websocket" => {
+                // Find the WebSocket connection for this server
+                let channel_id = self
+                    .ws_connections
+                    .iter()
+                    .find(|(_, conn)| conn.server_id == server_id)
+                    .map(|(id, _)| *id)
+                    .ok_or_else(|| {
+                        format!("No WebSocket connection found for server {}", server_id)
+                    })?;
+
                 // Execute via WebSocket
                 let request_id = format!("tool_{}_{}", channel_id, Uuid::new_v4());
 
@@ -1739,7 +2006,6 @@ impl SpiderState {
             let result = if let Some(server_id) = server_id {
                 let params: Value = serde_json::from_str(&tool_call.parameters)
                     .unwrap_or(Value::Object(serde_json::Map::new()));
-
                 match self
                     .execute_mcp_tool(
                         &server_id,
@@ -1766,5 +2032,106 @@ impl SpiderState {
         }
 
         Ok(results)
+    }
+
+
+    async fn test_hypergrid_connection(
+        &self,
+        url: &str,
+        token: &str,
+        client_id: &str,
+    ) -> Result<String, String> {
+        // Test the hypergrid connection with a simple search request
+        let test_message = HypergridMessage {
+            request: HypergridMessageType::SearchRegistry("test".to_string()),
+        };
+
+        let body = serde_json::to_string(&test_message)
+            .map_err(|e| format!("Failed to serialize test message: {}", e))?;
+
+        // Make HTTP request to test the connection
+        use hyperware_process_lib::http::client::send_request_await_response;
+        use hyperware_process_lib::http::Method;
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        headers.insert("X-Client-ID".to_string(), client_id.to_string());
+        headers.insert("X-Token".to_string(), token.to_string());
+
+        let parsed_url = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+
+        let response = send_request_await_response(
+            Method::POST,
+            parsed_url,
+            Some(headers),
+            30000, // 30 second timeout
+            body.into_bytes(),
+        )
+        .await
+        .map_err(|e| format!("Failed to test hypergrid connection: {:?}", e))?;
+
+        // Check if response is successful (status 200 or 404 for search not found)
+        let status_code = response.status().as_u16();
+        if status_code != 200 && status_code != 404 {
+            return Err(format!(
+                "Hypergrid connection test failed with status: {}",
+                status_code
+            ));
+        }
+
+        Ok("Connection test successful".to_string())
+    }
+
+    async fn call_hypergrid_api(
+        &self,
+        url: &str,
+        token: &str,
+        client_id: &str,
+        message: &HypergridMessage,
+    ) -> Result<String, String> {
+        let body = serde_json::to_string(message)
+            .map_err(|e| format!("Failed to serialize message: {}", e))?;
+
+        println!("Spider: Calling hypergrid API with message: {}", body);
+
+        // Make HTTP request
+        use hyperware_process_lib::http::client::send_request_await_response;
+        use hyperware_process_lib::http::Method;
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        headers.insert("X-Client-ID".to_string(), client_id.to_string());
+        headers.insert("X-Token".to_string(), token.to_string());
+
+        let parsed_url = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+
+        let response = send_request_await_response(
+            Method::POST,
+            parsed_url,
+            Some(headers),
+            60000, // 60 second timeout for actual calls
+            body.into_bytes(),
+        )
+        .await
+        .map_err(|e| format!("Failed to call hypergrid API: {:?}", e))?;
+
+        // Convert response body to string
+        let response_text = String::from_utf8(response.body().to_vec())
+            .unwrap_or_else(|_| "Invalid UTF-8 response".to_string());
+
+        let status_code = response.status().as_u16();
+        println!(
+            "Spider: Hypergrid API response (status {}): {}",
+            status_code, response_text
+        );
+
+        if status_code >= 400 {
+            return Err(format!(
+                "Hypergrid API error (status {}): {}",
+                status_code, response_text
+            ));
+        }
+
+        Ok(response_text)
     }
 }

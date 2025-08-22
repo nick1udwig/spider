@@ -26,11 +26,15 @@ interface McpServer {
     command?: string;
     args?: string[];
     url?: string;
+    hypergridToken?: string;
+    hypergridClientId?: string;
+    hypergridNode?: string;
   };
   tools: Array<{
     name: string;
     description: string;
     parameters: string;
+    inputSchemaJson?: string;
   }>;
   connected: boolean;
 }

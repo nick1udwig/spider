@@ -26,6 +26,8 @@ pub struct SpiderState {
     pub chat_clients: HashMap<u32, ChatClient>, // channel_id -> chat client connection
     #[serde(skip)]
     pub active_chat_cancellation: HashMap<u32, Arc<AtomicBool>>, // channel_id -> cancellation flag
+    #[serde(skip)]
+    pub hypergrid_connections: HashMap<String, HypergridConnection>, // server_id -> hypergrid connection
 }
 
 #[derive(Clone, Debug)]
@@ -100,10 +102,17 @@ pub(crate) struct McpServer {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct TransportConfig {
     #[serde(rename = "transportType")]
-    pub(crate) transport_type: String, // "stdio" or "http"
+    pub(crate) transport_type: String, // "stdio", "http", "websocket", or "hypergrid"
     pub(crate) command: Option<String>,
     pub(crate) args: Option<Vec<String>>,
     pub(crate) url: Option<String>,
+    // Hypergrid-specific fields
+    #[serde(rename = "hypergridToken")]
+    pub(crate) hypergrid_token: Option<String>,
+    #[serde(rename = "hypergridClientId")]
+    pub(crate) hypergrid_client_id: Option<String>,
+    #[serde(rename = "hypergridNode")]
+    pub(crate) hypergrid_node: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -455,6 +464,51 @@ pub(crate) enum WsServerMessage {
     Error { error: String },
     #[serde(rename = "pong")]
     Pong,
+}
+
+// Hypergrid types
+#[derive(Clone, Debug)]
+pub(crate) struct HypergridConnection {
+    pub(crate) server_id: String,
+    pub(crate) url: String,
+    pub(crate) token: String,
+    pub(crate) client_id: String,
+    pub(crate) node: String,
+    pub(crate) last_retry: std::time::Instant,
+    pub(crate) retry_count: u32,
+    pub(crate) connected: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+pub(crate) enum HypergridRequest {
+    SearchRegistry(String),
+    CallProvider {
+        #[serde(rename = "providerId")]
+        provider_id: String,
+        #[serde(rename = "providerName")]
+        provider_name: String,
+        arguments: Vec<(String, String)>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct HypergridMessage {
+    #[serde(flatten)]
+    pub(crate) request: HypergridMessageType,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub(crate) enum HypergridMessageType {
+    SearchRegistry(String),
+    CallProvider {
+        #[serde(rename = "providerId")]
+        provider_id: String,
+        #[serde(rename = "providerName")]
+        provider_name: String,
+        arguments: Vec<(String, String)>,
+    },
 }
 
 // OAuth types
