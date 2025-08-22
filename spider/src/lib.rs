@@ -27,11 +27,11 @@ use types::{
     HypergridMessage, HypergridMessageType, JsonRpcNotification, JsonRpcRequest,
     ListApiKeysRequest, ListConversationsRequest, ListMcpServersRequest, ListSpiderKeysRequest,
     McpCapabilities, McpClientInfo, McpInitializeParams, McpRequestType, McpServer,
-    McpToolCallParams, Message, OAuthExchangeRequest, OAuthRefreshRequest, OAuthTokenResponse,
-    PendingMcpRequest, ProcessRequest, ProcessResponse, RemoveApiKeyRequest,
-    RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest, SpiderApiKey, SpiderState,
-    Tool, ToolCall, ToolExecutionResult, ToolResult, UpdateConfigRequest, WsClientMessage,
-    WsConnection, WsServerMessage,
+    McpServerDetails, McpToolCallParams, McpToolInfo, Message, OAuthExchangeRequest,
+    OAuthRefreshRequest, OAuthTokenResponse, PendingMcpRequest, ProcessRequest, ProcessResponse,
+    RemoveApiKeyRequest, RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest,
+    SpiderApiKey, SpiderState, Tool, ToolCall, ToolExecutionResult, ToolResult,
+    UpdateConfigRequest, WsClientMessage, WsConnection, WsServerMessage,
 };
 
 mod utils;
@@ -72,45 +72,112 @@ impl SpiderState {
 
         let our_node = our().node.clone();
         println!("Spider MCP client initialized on node: {}", our_node);
-        
-        // Always create the hypergrid MCP server
-        let hypergrid_server = McpServer {
-            id: "hypergrid_default".to_string(),
-            name: "Hypergrid".to_string(),
-            transport: types::TransportConfig {
-                transport_type: "hypergrid".to_string(),
-                command: None,
-                args: None,
-                url: Some("http://localhost:8080/operator:hypergrid:ware.hypr/shim/mcp".to_string()),
-                hypergrid_token: None,
-                hypergrid_client_id: None,
-                hypergrid_node: None,
-            },
-            tools: vec![
-                Tool {
-                    name: "hypergrid_authorize".to_string(),
-                    description: "Configure Hypergrid connection credentials. Use this when you receive hypergrid auth strings.".to_string(),
-                    parameters: r#"{"type":"object","properties":{"url":{"type":"string"},"token":{"type":"string"},"client_id":{"type":"string"},"node":{"type":"string"}},"required":["url","token","client_id","node"]}"#.to_string(),
-                    input_schema_json: Some(r#"{"type":"object","properties":{"url":{"type":"string","description":"The base URL for the Hypergrid API"},"token":{"type":"string","description":"The authentication token"},"client_id":{"type":"string","description":"The unique client ID"},"node":{"type":"string","description":"The Hyperware node name"}},"required":["url","token","client_id","node"]}"#.to_string()),
+
+        // Check if there's already a hypergrid server
+        let has_hypergrid = self
+            .mcp_servers
+            .iter()
+            .any(|s| s.transport.transport_type == "hypergrid");
+
+        // Only create the hypergrid MCP server if none exists
+        if !has_hypergrid {
+            let hypergrid_server = McpServer {
+                id: "hypergrid_default".to_string(),
+                name: "Hypergrid".to_string(),
+                transport: types::TransportConfig {
+                    transport_type: "hypergrid".to_string(),
+                    command: None,
+                    args: None,
+                    url: Some("http://localhost:8080/operator:hypergrid:ware.hypr/shim/mcp".to_string()),
+                    hypergrid_token: None,
+                    hypergrid_client_id: None,
+                    hypergrid_node: None,
                 },
-                Tool {
-                    name: "hypergrid_search".to_string(),
-                    description: "Search the Hypergrid provider registry for available data providers.".to_string(),
-                    parameters: r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#.to_string(),
-                    input_schema_json: Some(r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query for providers"}},"required":["query"]}"#.to_string()),
-                },
-                Tool {
-                    name: "hypergrid_call".to_string(),
-                    description: "Call a Hypergrid provider with arguments to retrieve data.".to_string(),
-                    parameters: r#"{"type":"object","properties":{"providerId":{"type":"string"},"providerName":{"type":"string"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}}}},"required":["providerId","providerName","callArgs"]}"#.to_string(),
-                    input_schema_json: Some(r#"{"type":"object","properties":{"providerId":{"type":"string","description":"The provider ID"},"providerName":{"type":"string","description":"The provider name"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"Arguments as array of [key, value] pairs"}},"required":["providerId","providerName","callArgs"]}"#.to_string()),
-                },
-            ],
-            connected: true, // Always mark as connected
-        };
-        
-        self.mcp_servers.push(hypergrid_server);
-        println!("Spider: Hypergrid MCP server initialized (unconfigured)");
+                tools: vec![
+                    Tool {
+                        name: "hypergrid_authorize".to_string(),
+                        description: "Configure Hypergrid connection credentials. Use this when you receive hypergrid auth strings.".to_string(),
+                        parameters: r#"{"type":"object","properties":{"url":{"type":"string"},"token":{"type":"string"},"client_id":{"type":"string"},"node":{"type":"string"}},"required":["url","token","client_id","node"]}"#.to_string(),
+                        input_schema_json: Some(r#"{"type":"object","properties":{"url":{"type":"string","description":"The base URL for the Hypergrid API"},"token":{"type":"string","description":"The authentication token"},"client_id":{"type":"string","description":"The unique client ID"},"node":{"type":"string","description":"The Hyperware node name"}},"required":["url","token","client_id","node"]}"#.to_string()),
+                    },
+                    Tool {
+                        name: "hypergrid_search".to_string(),
+                        description: "Search the Hypergrid provider registry for available data providers.".to_string(),
+                        parameters: r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#.to_string(),
+                        input_schema_json: Some(r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query for providers"}},"required":["query"]}"#.to_string()),
+                    },
+                    Tool {
+                        name: "hypergrid_call".to_string(),
+                        description: "Call a Hypergrid provider with arguments to retrieve data.".to_string(),
+                        parameters: r#"{"type":"object","properties":{"providerId":{"type":"string"},"providerName":{"type":"string"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}}}},"required":["providerId","providerName","callArgs"]}"#.to_string(),
+                        input_schema_json: Some(r#"{"type":"object","properties":{"providerId":{"type":"string","description":"The provider ID"},"providerName":{"type":"string","description":"The provider name"},"callArgs":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"Arguments as array of [key, value] pairs"}},"required":["providerId","providerName","callArgs"]}"#.to_string()),
+                    },
+                ],
+                connected: true, // Always mark as connected
+            };
+
+            self.mcp_servers.push(hypergrid_server);
+            println!("Spider: Hypergrid MCP server initialized (unconfigured)");
+        } else {
+            println!("Spider: Hypergrid MCP server already exists, skipping initialization");
+
+            // Restore hypergrid connections for configured servers
+            for server in self.mcp_servers.iter() {
+                if server.transport.transport_type == "hypergrid" {
+                    println!(
+                        "Spider: Found hypergrid server '{}' (id: {})",
+                        server.name, server.id
+                    );
+                    println!("  - URL: {:?}", server.transport.url);
+                    println!(
+                        "  - Token: {}",
+                        server
+                            .transport
+                            .hypergrid_token
+                            .as_ref()
+                            .map(|t| if t.len() > 20 {
+                                format!("{}...", &t[..20])
+                            } else {
+                                t.clone()
+                            })
+                            .unwrap_or_else(|| "None".to_string())
+                    );
+                    println!("  - Client ID: {:?}", server.transport.hypergrid_client_id);
+                    println!("  - Node: {:?}", server.transport.hypergrid_node);
+                    println!("  - Tools: {} available", server.tools.len());
+
+                    if let (Some(url), Some(token), Some(client_id), Some(node)) = (
+                        &server.transport.url,
+                        &server.transport.hypergrid_token,
+                        &server.transport.hypergrid_client_id,
+                        &server.transport.hypergrid_node,
+                    ) {
+                        // This server is configured, restore its connection
+                        let hypergrid_conn = HypergridConnection {
+                            server_id: server.id.clone(),
+                            url: url.clone(),
+                            token: token.clone(),
+                            client_id: client_id.clone(),
+                            node: node.clone(),
+                            last_retry: Instant::now(),
+                            retry_count: 0,
+                            connected: true,
+                        };
+                        self.hypergrid_connections
+                            .insert(server.id.clone(), hypergrid_conn);
+                        println!(
+                            "Spider: ✅ Restored hypergrid connection for {} ({})",
+                            server.name, node
+                        );
+                    } else {
+                        println!(
+                            "Spider: ⚠️  Hypergrid server '{}' is not fully configured",
+                            server.name
+                        );
+                    }
+                }
+            }
+        }
 
         // Create an admin Spider key for the GUI with a random suffix for security
         // Check if admin key already exists (look for keys with admin permission and the GUI name)
@@ -1496,12 +1563,40 @@ impl SpiderState {
         let initial_message_count = request.messages.len();
         let new_messages = working_messages[initial_message_count..].to_vec();
 
+        // Gather MCP server details for the conversation
+        let mcp_server_ids = request.mcp_servers.clone().unwrap_or_default();
+        let mcp_servers_details: Vec<McpServerDetails> = mcp_server_ids
+            .iter()
+            .filter_map(|server_id| {
+                self.mcp_servers
+                    .iter()
+                    .find(|s| &s.id == server_id)
+                    .map(|server| McpServerDetails {
+                        id: server.id.clone(),
+                        name: server.name.clone(),
+                        tools: server
+                            .tools
+                            .iter()
+                            .map(|tool| McpToolInfo {
+                                name: tool.name.clone(),
+                                description: tool.description.clone(),
+                            })
+                            .collect(),
+                    })
+            })
+            .collect();
+
         let conversation = Conversation {
             id: conversation_id.clone(),
             messages: working_messages,
             metadata,
             llm_provider,
-            mcp_servers: request.mcp_servers.unwrap_or_default(),
+            mcp_servers: mcp_server_ids,
+            mcp_servers_details: if mcp_servers_details.is_empty() {
+                None
+            } else {
+                Some(mcp_servers_details)
+            },
         };
 
         // Save to VFS
@@ -1715,7 +1810,6 @@ impl SpiderState {
             .insert(pending.request_id.clone(), result);
     }
 
-
     async fn execute_mcp_tool(
         &mut self,
         server_id: &str,
@@ -1742,6 +1836,12 @@ impl SpiderState {
                 // Handle the different hypergrid tools
                 match tool_name {
                     "hypergrid_authorize" => {
+                        println!(
+                            "Spider: hypergrid_authorize called for server_id: {}",
+                            server_id
+                        );
+                        println!("  Parameters received: {:?}", parameters);
+
                         // Update hypergrid credentials
                         let new_url = parameters
                             .get("url")
@@ -1760,9 +1860,17 @@ impl SpiderState {
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| "Missing node parameter".to_string())?;
 
+                        println!("Spider: Authorizing hypergrid with:");
+                        println!("  - URL: {}", new_url);
+                        println!("  - Token: {}...", &new_token[..new_token.len().min(20)]);
+                        println!("  - Client ID: {}", new_client_id);
+                        println!("  - Node: {}", new_node);
+
                         // Test new connection
+                        println!("Spider: Testing hypergrid connection...");
                         self.test_hypergrid_connection(new_url, new_token, new_client_id)
                             .await?;
+                        println!("Spider: Connection test successful!");
 
                         // Create or update the hypergrid connection
                         let hypergrid_conn = HypergridConnection {
@@ -1775,17 +1883,27 @@ impl SpiderState {
                             retry_count: 0,
                             connected: true,
                         };
-                        
-                        self.hypergrid_connections.insert(server_id.to_string(), hypergrid_conn);
+
+                        self.hypergrid_connections
+                            .insert(server_id.to_string(), hypergrid_conn);
+                        println!("Spider: Stored hypergrid connection in memory");
 
                         // Update transport config
                         if let Some(server) =
                             self.mcp_servers.iter_mut().find(|s| s.id == server_id)
                         {
+                            println!("Spider: Updating server '{}' transport config", server.name);
                             server.transport.url = Some(new_url.to_string());
                             server.transport.hypergrid_token = Some(new_token.to_string());
                             server.transport.hypergrid_client_id = Some(new_client_id.to_string());
                             server.transport.hypergrid_node = Some(new_node.to_string());
+                            println!("Spider: Server transport config updated successfully");
+                            println!("Spider: State should auto-save due to SaveOptions::OnDiff");
+                        } else {
+                            println!(
+                                "Spider: WARNING - Could not find server with id: {}",
+                                server_id
+                            );
                         }
 
                         Ok(serde_json::json!({
@@ -2033,7 +2151,6 @@ impl SpiderState {
 
         Ok(results)
     }
-
 
     async fn test_hypergrid_connection(
         &self,

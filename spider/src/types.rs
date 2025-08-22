@@ -133,6 +133,21 @@ pub(crate) struct Conversation {
     pub(crate) llm_provider: String,
     #[serde(rename = "mcpServers")]
     pub(crate) mcp_servers: Vec<String>,
+    #[serde(rename = "mcpServersDetails", skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_servers_details: Option<Vec<McpServerDetails>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct McpServerDetails {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) tools: Vec<McpToolInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct McpToolInfo {
+    pub(crate) name: String,
+    pub(crate) description: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
