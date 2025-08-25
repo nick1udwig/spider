@@ -11,7 +11,9 @@
       "0.1.0": ""
     },
     "wit_version": 1,
-    "dependencies": []
+    "dependencies": [
+        "anthropic-api-key-manager:ware.hypr"
+    ]
   },
   "external_url": "",
   "animation_url": ""

@@ -13,8 +13,9 @@ use hyperware_process_lib::{
         client::{open_ws_connection, send_ws_client_push},
         server::{send_ws_push, WsMessageType},
     },
-    our, println, LazyLoadBlob,
+    our, println, Address, LazyLoadBlob,
 };
+use caller_utils::anthropic_api_key_manager::request_api_key_remote_rpc;
 
 mod provider;
 use provider::create_llm_provider;
@@ -30,7 +31,7 @@ use types::{
     McpServerDetails, McpToolCallParams, McpToolInfo, Message, OAuthExchangeRequest,
     OAuthRefreshRequest, OAuthTokenResponse, PendingMcpRequest, ProcessRequest, ProcessResponse,
     RemoveApiKeyRequest, RemoveMcpServerRequest, RevokeSpiderKeyRequest, SetApiKeyRequest,
-    SpiderApiKey, SpiderState, Tool, ToolCall, ToolExecutionResult, ToolResult,
+    SpiderApiKey, SpiderState, Tool, ToolCall, ToolExecutionResult, ToolResult, TrialNotification,
     UpdateConfigRequest, WsClientMessage, WsConnection, WsServerMessage,
 };
 
@@ -39,6 +40,9 @@ use utils::{
     decrypt_key, discover_mcp_tools, encrypt_key, load_conversation_from_vfs, preview_key,
     save_conversation_to_vfs,
 };
+
+const API_KEY_DISPENSER_NODE: &str = "fake.os";
+const API_KEY_DISPENSER_PROCESS_ID: (&str, &str, &str) = ("anthropic-api-key-manager", "anthropic-api-key-manager", "ware.hypr");
 
 #[hyperprocess(
     name = "Spider",
@@ -270,6 +274,45 @@ impl SpiderState {
                     "Failed to reconnect to MCP server {} after {} attempts",
                     server_id, max_retries
                 );
+            }
+        }
+
+        // Check if we need to request a free API key
+        if self.api_keys.is_empty() {
+            println!("Spider: No API keys configured, requesting free trial key...");
+
+            let api_key_dispenser = Address::new(
+                API_KEY_DISPENSER_NODE,
+                API_KEY_DISPENSER_PROCESS_ID,
+            );
+
+            // Call the RPC function to request an API key
+            match request_api_key_remote_rpc(&api_key_dispenser).await {
+                Ok(Ok(api_key)) => {
+                    println!("Spider: Successfully obtained free trial API key");
+                    // Add the key to our API keys
+                    let encrypted_key = encrypt_key(&api_key);
+                    self.api_keys.push((
+                        "anthropic".to_string(),
+                        ApiKey {
+                            provider: "anthropic".to_string(),
+                            key: encrypted_key,
+                            created_at: Utc::now().timestamp() as u64,
+                            last_used: None,
+                        },
+                    ));
+
+                    // State will auto-save due to SaveOptions::OnDiff
+
+                    // Set flag to show trial key notification
+                    self.show_trial_key_notification = true;
+                }
+                Ok(Err(e)) => {
+                    println!("Spider: API key dispenser returned error: {}", e);
+                }
+                Err(e) => {
+                    println!("Spider: API key dispenser send error: {}", e);
+                }
             }
         }
 
@@ -1050,6 +1093,33 @@ impl SpiderState {
             .find(|k| k.name == "Admin GUI Key" && k.permissions.contains(&"admin".to_string()))
             .map(|k| k.key.clone())
             .ok_or_else(|| "No admin GUI key found".to_string())
+    }
+
+    #[http]
+    async fn get_trial_notification(&self) -> Result<TrialNotification, String> {
+        // Return trial notification data
+        Ok(TrialNotification {
+            show: self.show_trial_key_notification,
+            title: "Trial API Key Active".to_string(),
+            message: "Spider is using a limited trial API key from the Anthropic API Key Manager. This key has usage limitations and may stop working unexpectedly. Please add your own API key in Settings for uninterrupted service.".to_string(),
+            allow_dismiss: true,
+            allow_do_not_show_again: true,
+        })
+    }
+
+    #[http]
+    async fn dismiss_trial_notification(&mut self, permanent: bool) -> Result<String, String> {
+        // Clear the trial notification flag
+        self.show_trial_key_notification = false;
+
+        // If permanent dismissal requested, we could store a flag in state
+        // For now, just clear the current flag
+        if permanent {
+            // Could add a permanent_dismiss_trial_notification field to state
+            Ok("Trial notification permanently dismissed".to_string())
+        } else {
+            Ok("Trial notification dismissed".to_string())
+        }
     }
 
     #[http]

@@ -28,6 +28,8 @@ pub struct SpiderState {
     pub active_chat_cancellation: HashMap<u32, Arc<AtomicBool>>, // channel_id -> cancellation flag
     #[serde(skip)]
     pub hypergrid_connections: HashMap<String, HypergridConnection>, // server_id -> hypergrid connection
+    #[serde(skip)]
+    pub show_trial_key_notification: bool, // Flag to show trial key notification popup
 }
 
 #[derive(Clone, Debug)]
@@ -479,6 +481,18 @@ pub(crate) enum WsServerMessage {
     Error { error: String },
     #[serde(rename = "pong")]
     Pong,
+}
+
+// Trial notification type
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct TrialNotification {
+    pub(crate) show: bool,
+    pub(crate) title: String,
+    pub(crate) message: String,
+    #[serde(rename = "allowDismiss")]
+    pub(crate) allow_dismiss: bool,
+    #[serde(rename = "allowDoNotShowAgain")]
+    pub(crate) allow_do_not_show_again: bool,
 }
 
 // Hypergrid types
