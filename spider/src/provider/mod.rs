@@ -47,16 +47,18 @@ impl LlmProvider for OpenAIProvider {
 }
 
 pub(crate) fn create_llm_provider(provider_type: &str, api_key: &str) -> Box<dyn LlmProvider> {
+    use crate::utils::is_oauth_token;
+
     match provider_type {
         "anthropic" => {
-            // Check if this is an OAuth token (starts with sk-ant- or ant-)
-            let is_oauth = api_key.starts_with("sk-ant-") || api_key.starts_with("ant-");
+            // Check if this is an OAuth token by examining the third field
+            let is_oauth = is_oauth_token(api_key);
             Box::new(AnthropicProvider::new(api_key.to_string(), is_oauth))
         }
         "openai" => Box::new(OpenAIProvider::new(api_key.to_string())),
         _ => {
             // Default to Anthropic
-            let is_oauth = api_key.starts_with("sk-ant-") || api_key.starts_with("ant-");
+            let is_oauth = is_oauth_token(api_key);
             Box::new(AnthropicProvider::new(api_key.to_string(), is_oauth))
         }
     }

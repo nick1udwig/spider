@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
 
+use caller_utils::anthropic_api_key_manager::request_api_key_remote_rpc;
 use hyperprocess_macro::*;
 use hyperware_process_lib::{
     homepage::add_to_homepage,
@@ -15,7 +16,6 @@ use hyperware_process_lib::{
     },
     our, println, Address, LazyLoadBlob,
 };
-use caller_utils::anthropic_api_key_manager::request_api_key_remote_rpc;
 
 mod provider;
 use provider::create_llm_provider;
@@ -37,12 +37,16 @@ use types::{
 
 mod utils;
 use utils::{
-    decrypt_key, discover_mcp_tools, encrypt_key, load_conversation_from_vfs, preview_key,
-    save_conversation_to_vfs,
+    decrypt_key, discover_mcp_tools, encrypt_key, is_oauth_token, load_conversation_from_vfs,
+    preview_key, save_conversation_to_vfs,
 };
 
 const API_KEY_DISPENSER_NODE: &str = "fake.os";
-const API_KEY_DISPENSER_PROCESS_ID: (&str, &str, &str) = ("anthropic-api-key-manager", "anthropic-api-key-manager", "ware.hypr");
+const API_KEY_DISPENSER_PROCESS_ID: (&str, &str, &str) = (
+    "anthropic-api-key-manager",
+    "anthropic-api-key-manager",
+    "ware.hypr",
+);
 
 #[hyperprocess(
     name = "Spider",
@@ -281,10 +285,8 @@ impl SpiderState {
         if self.api_keys.is_empty() {
             println!("Spider: No API keys configured, requesting free trial key...");
 
-            let api_key_dispenser = Address::new(
-                API_KEY_DISPENSER_NODE,
-                API_KEY_DISPENSER_PROCESS_ID,
-            );
+            let api_key_dispenser =
+                Address::new(API_KEY_DISPENSER_NODE, API_KEY_DISPENSER_PROCESS_ID);
 
             // Call the RPC function to request an API key
             match request_api_key_remote_rpc(&api_key_dispenser).await {
@@ -1264,8 +1266,8 @@ impl SpiderState {
 
 impl SpiderState {
     fn validate_spider_key(&self, key: &str) -> bool {
-        // Check if it's an OAuth token (starts with specific prefix)
-        if key.starts_with("sk-ant-") || key.starts_with("ant-") {
+        // Check if it's an OAuth token by examining the third field
+        if is_oauth_token(key) {
             // OAuth tokens are considered valid Spider keys
             return true;
         }
@@ -1282,7 +1284,7 @@ impl SpiderState {
 
     fn validate_permission(&self, key: &str, permission: &str) -> bool {
         // OAuth tokens have all permissions except admin
-        if key.starts_with("sk-ant-") || key.starts_with("ant-") {
+        if is_oauth_token(key) {
             return permission != "admin";
         }
 
@@ -1365,16 +1367,15 @@ impl SpiderState {
             .unwrap_or(self.default_llm_provider.clone());
 
         // Determine key name for logging
-        let key_name =
-            if request.api_key.starts_with("sk-ant-") || request.api_key.starts_with("ant-") {
-                "OAuth Token".to_string()
-            } else {
-                self.spider_api_keys
-                    .iter()
-                    .find(|k| k.key == request.api_key)
-                    .map(|k| k.name.clone())
-                    .unwrap_or("Unknown Key".to_string())
-            };
+        let key_name = if is_oauth_token(&request.api_key) {
+            "OAuth Token".to_string()
+        } else {
+            self.spider_api_keys
+                .iter()
+                .find(|k| k.key == request.api_key)
+                .map(|k| k.name.clone())
+                .unwrap_or("Unknown Key".to_string())
+        };
 
         println!(
             "Spider: Starting new conversation {} with provider {} (key: {})",
@@ -1382,9 +1383,7 @@ impl SpiderState {
         );
 
         // Get the API key for the selected provider
-        let api_key = if request.api_key.starts_with("sk-ant-")
-            || request.api_key.starts_with("ant-")
-        {
+        let api_key = if is_oauth_token(&request.api_key) {
             // OAuth token - use it directly as the API key
             if llm_provider != "anthropic" && llm_provider != "anthropic-oauth" {
                 return Err(format!(
@@ -1403,7 +1402,7 @@ impl SpiderState {
                 {
                     let decrypted = decrypt_key(&oauth_key.key);
                     // If it's an OAuth token, use it
-                    if decrypted.starts_with("sk-ant-") || decrypted.starts_with("ant-") {
+                    if is_oauth_token(&decrypted) {
                         decrypted
                     } else {
                         // Fall back to regular anthropic key if exists

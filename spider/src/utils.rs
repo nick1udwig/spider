@@ -5,6 +5,23 @@ use hyperware_process_lib::{
 
 use crate::types::{Conversation, Tool, TransportConfig};
 
+/// Check if an API key is an OAuth token by examining the third field
+/// OAuth tokens have "oat" followed by 2 digits in the third field (e.g., sk-ant-oat01-...)
+/// API keys have "api" followed by 2 digits in the third field (e.g., sk-ant-api03-...)
+pub(crate) fn is_oauth_token(key: &str) -> bool {
+    // Split the key by '-' and check the third field
+    let parts: Vec<&str> = key.split('-').collect();
+    if parts.len() >= 3 {
+        let third_field = parts[2];
+        // Check if it starts with "oat" followed by 2 digits
+        if third_field.len() >= 5 && third_field.starts_with("oat") {
+            let suffix = &third_field[3..5];
+            return suffix.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
 pub(crate) fn encrypt_key(key: &str) -> String {
     // For actual encryption, use base64 encoding with a marker
     // In production, this should use proper encryption with a key derivation function
