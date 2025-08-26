@@ -14,7 +14,8 @@ use hyperware_process_lib::{
         client::{open_ws_connection, send_ws_client_push},
         server::{send_ws_push, WsMessageType},
     },
-    our, println, Address, LazyLoadBlob,
+    hyperapp::source,
+    our, println, Address, LazyLoadBlob, ProcessId,
 };
 
 mod provider;
@@ -47,6 +48,7 @@ const API_KEY_DISPENSER_PROCESS_ID: (&str, &str, &str) = (
     "anthropic-api-key-manager",
     "ware.hypr",
 );
+const HYPERGRID: &str = "operator:hypergrid:ware.hypr";
 
 #[hyperprocess(
     name = "Spider",
@@ -642,13 +644,15 @@ impl SpiderState {
         }
     }
 
+    #[local]
     #[http]
     async fn create_spider_key(
         &mut self,
         request: CreateSpiderKeyRequest,
     ) -> Result<SpiderApiKey, String> {
         // Validate admin key
-        if !self.validate_admin_key(&request.admin_key) {
+        let hypergrid: ProcessId = HYPERGRID.parse().unwrap();
+        if !self.validate_admin_key(&request.admin_key) || source().process == hypergrid {
             return Err("Unauthorized: Invalid or non-admin Spider API key".to_string());
         }
 
