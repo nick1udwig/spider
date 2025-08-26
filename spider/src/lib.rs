@@ -42,7 +42,11 @@ use utils::{
     preview_key, save_conversation_to_vfs,
 };
 
+#[cfg(not(feature = "simulation-mode"))]
+const API_KEY_DISPENSER_NODE: &str = "free-keys.os";
+#[cfg(feature = "simulation-mode")]
 const API_KEY_DISPENSER_NODE: &str = "fake.os";
+
 const API_KEY_DISPENSER_PROCESS_ID: (&str, &str, &str) = (
     "anthropic-api-key-manager",
     "anthropic-api-key-manager",
