@@ -728,6 +728,7 @@ impl SpiderState {
         Ok(server_id)
     }
 
+    #[local]
     #[http]
     async fn list_mcp_servers(
         &self,
