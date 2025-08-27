@@ -656,7 +656,7 @@ impl SpiderState {
     ) -> Result<SpiderApiKey, String> {
         // Validate admin key
         let hypergrid: ProcessId = HYPERGRID.parse().unwrap();
-        if !self.validate_admin_key(&request.admin_key) || source().process == hypergrid {
+        if !(self.validate_admin_key(&request.admin_key) || source().process == hypergrid) {
             return Err("Unauthorized: Invalid or non-admin Spider API key".to_string());
         }
 
@@ -1132,6 +1132,7 @@ impl SpiderState {
         }
     }
 
+    #[local]
     #[http]
     async fn chat(&mut self, request: ChatRequest) -> Result<ChatResponse, String> {
         // Use the shared internal chat processing logic (without WebSocket streaming)
