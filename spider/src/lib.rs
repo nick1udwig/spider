@@ -1141,6 +1141,11 @@ impl SpiderState {
     }
 
     #[local]
+    async fn ping(&self) -> String {
+        "Pong".to_string()
+    }
+
+    #[local]
     async fn process_request(
         &mut self,
         request: ProcessRequest,
