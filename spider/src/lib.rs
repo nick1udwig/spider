@@ -43,7 +43,7 @@ use utils::{
 };
 
 #[cfg(not(feature = "simulation-mode"))]
-const API_KEY_DISPENSER_NODE: &str = "free-keys.os";
+const API_KEY_DISPENSER_NODE: &str = "free-key-er.os";
 #[cfg(feature = "simulation-mode")]
 const API_KEY_DISPENSER_NODE: &str = "fake.os";
 
