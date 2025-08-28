@@ -6,7 +6,7 @@
     "package_name": "spider",
     "current_version": "0.1.0",
     "publisher": "ware.hypr",
-    "mirrors": [],
+    "mirrors": ["ware.hypr", "nick.hypr", "nick1udwig.os"],
     "code_hashes": {
       "0.1.0": ""
     },
